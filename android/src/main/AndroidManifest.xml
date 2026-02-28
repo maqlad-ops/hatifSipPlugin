@@ -1,0 +1,81 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.spagreen.linphonesdk">
+
+    <!-- =============================
+         CORE VoIP PERMISSIONS
+         ============================= -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.USE_SIP" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.CAMERA"/>
+    
+    <!-- =============================
+         FOREGROUND SERVICE PERMISSIONS (Android 14+)
+         ============================= -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    
+    <!-- =============================
+         WAKE LOCK - Keep device awake for calls
+         ============================= -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    
+    <!-- =============================
+         BLUETOOTH PERMISSIONS - Required for Bluetooth audio routing
+         ============================= -->
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+    
+    <!-- =============================
+         NETWORK PERMISSIONS - Required for proper network handling
+         ============================= -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    
+    <!-- =============================
+         AUDIO PERMISSIONS - Required for audio focus and routing
+         ============================= -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    
+    <!-- =============================
+         VIBRATE - For incoming call notification
+         ============================= -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    
+    <!-- =============================
+         BOOT COMPLETED - For background registration
+         ============================= -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    
+    <!-- =============================
+         PUSH NOTIFICATIONS (FCM)
+         ============================= -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:usesCleartextTraffic="true">
+
+        <!-- Linphone Core Service for background operation -->
+        <service
+            android:name="org.linphone.core.tools.service.CoreService"
+            android:foregroundServiceType="phoneCall|camera|microphone"
+            android:stopWithTask="false"
+            android:exported="false" />
+
+        <!-- Our foreground service to keep SIP alive for incoming calls -->
+        <service
+            android:name="com.spagreen.linphonesdk.SipForegroundService"
+            android:foregroundServiceType="phoneCall|microphone"
+            android:stopWithTask="false"
+            android:exported="false" />
+
+    </application>
+
+</manifest>
