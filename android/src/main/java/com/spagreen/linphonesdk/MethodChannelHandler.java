@@ -79,6 +79,27 @@ public class MethodChannelHandler implements MethodChannel.MethodCallHandler {
                 result.success(linPhoneHelper.isMuted());
                 break;
 
+            case "hold_call":
+                Log.d(TAG, "hold_call requested");
+                result.success(linPhoneHelper.holdCall());
+                break;
+
+            case "resume_call":
+                Log.d(TAG, "resume_call requested");
+                result.success(linPhoneHelper.resumeCall());
+                break;
+
+            case "toggle_hold":
+                Log.d(TAG, "toggle_hold requested");
+                boolean isOnHold = linPhoneHelper.toggleHold();
+                result.success(isOnHold);
+                break;
+
+            case "is_on_hold":
+                Log.d(TAG, "is_on_hold query");
+                result.success(linPhoneHelper.isCallOnHold());
+                break;
+
             case "call":
                 Map callData = (Map) call.arguments;
                 String number = (String) callData.get("number");
@@ -93,6 +114,44 @@ public class MethodChannelHandler implements MethodChannel.MethodCallHandler {
                 Log.d(TAG, "transfer -> dest=" + destination);
                 boolean isTransferred = linPhoneHelper.callForward(destination);
                 result.success(isTransferred);
+                break;
+
+            case "blind_transfer":
+                Map blindData = (Map) call.arguments;
+                String blindDest = (String) blindData.get("destination");
+                Log.d(TAG, "blind_transfer -> dest=" + blindDest);
+                boolean blindOk = linPhoneHelper.blindTransfer(blindDest);
+                result.success(blindOk);
+                break;
+
+            case "attended_transfer":
+                Map attData = (Map) call.arguments;
+                String attDest = (String) attData.get("destination");
+                Log.d(TAG, "attended_transfer -> dest=" + attDest);
+                boolean attOk = linPhoneHelper.attendedTransfer(attDest);
+                result.success(attOk);
+                break;
+
+            case "complete_attended_transfer":
+                Log.d(TAG, "complete_attended_transfer requested");
+                boolean completeOk = linPhoneHelper.completeAttendedTransfer();
+                result.success(completeOk);
+                break;
+
+            case "cancel_attended_transfer":
+                Log.d(TAG, "cancel_attended_transfer requested");
+                boolean cancelOk = linPhoneHelper.cancelAttendedTransfer();
+                result.success(cancelOk);
+                break;
+
+            case "get_call_count":
+                Log.d(TAG, "get_call_count query");
+                result.success(linPhoneHelper.getCallCount());
+                break;
+
+            case "is_consult_connected":
+                Log.d(TAG, "is_consult_connected query");
+                result.success(linPhoneHelper.isConsultCallConnected());
                 break;
 
             case "toggle_speaker":

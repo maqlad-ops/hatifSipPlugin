@@ -180,6 +180,44 @@ class LinphoneFlutterPlugin {
     return res;
   }
 
+  // ---------------------------------------------------------------
+  // Hold / Resume
+  // ---------------------------------------------------------------
+
+  /// Put the current call on hold (sends SIP re-INVITE a=sendonly).
+  /// Returns true if hold was initiated successfully.
+  Future<bool> holdCall() async {
+    _log("holdCall");
+    final res = await _channel.invokeMethod("hold_call");
+    _log("holdCall result", data: res);
+    return res;
+  }
+
+  /// Resume a held call (sends SIP re-INVITE a=sendrecv).
+  /// Returns true if resume was initiated successfully.
+  Future<bool> resumeCall() async {
+    _log("resumeCall");
+    final res = await _channel.invokeMethod("resume_call");
+    _log("resumeCall result", data: res);
+    return res;
+  }
+
+  /// Toggle hold: if active → hold, if held → resume.
+  /// Returns true if call is now on hold, false if resumed.
+  Future<bool> toggleHold() async {
+    _log("toggleHold");
+    final res = await _channel.invokeMethod("toggle_hold");
+    _log("toggleHold result", data: res);
+    return res;
+  }
+
+  /// Check if current call is on hold.
+  Future<bool> isCallOnHold() async {
+    final res = await _channel.invokeMethod("is_on_hold");
+    _log("isCallOnHold", data: res);
+    return res;
+  }
+
   /// Make an outgoing call
   /// [number] - SIP URI or phone number to call
   Future<void> call({required String number}) async {
@@ -208,13 +246,85 @@ class LinphoneFlutterPlugin {
     return _channel.invokeMethod("remove_call_listener");
   }
 
-  /// Transfer current call to another destination
+  /// Transfer current call to another destination (legacy — calls blindTransfer)
   /// [destination] - SIP URI to transfer to
   Future<bool> callTransfer({required String destination}) async {
-    _log("callTransfer", data: {"destination": destination});
+    return blindTransfer(destination: destination);
+  }
+
+  // ---------------------------------------------------------------
+  // Call Transfer (Blind & Attended)
+  // ---------------------------------------------------------------
+
+  /// Blind (unattended) transfer — SIP REFER.
+  /// Immediately transfers the active call to [destination] without consulting
+  /// the transfer target first. The call is handed off and your leg drops.
+  ///
+  /// [destination] - SIP URI or phone number to transfer to
+  /// Returns true if the REFER was sent successfully
+  Future<bool> blindTransfer({required String destination}) async {
+    _log("blindTransfer", data: {"destination": destination});
     var data = {"destination": destination};
-    final res = await _channel.invokeMethod("transfer", data);
-    _log("callTransfer result", data: res);
+    final res = await _channel.invokeMethod("blind_transfer", data);
+    _log("blindTransfer result", data: res);
+    return res;
+  }
+
+  /// Start an attended (consultative) transfer.
+  ///
+  /// This puts the current call on hold and dials [destination] so you can
+  /// speak with the transfer target before completing the transfer.
+  ///
+  /// After the consultation call connects, call [completeAttendedTransfer()]
+  /// to bridge the two parties, or [cancelAttendedTransfer()] to hang up
+  /// the consultation and resume the original call.
+  ///
+  /// [destination] - SIP URI or phone number of the consult target
+  /// Returns true if the consultation call was initiated
+  Future<bool> attendedTransfer({required String destination}) async {
+    _log("attendedTransfer", data: {"destination": destination});
+    var data = {"destination": destination};
+    final res = await _channel.invokeMethod("attended_transfer", data);
+    _log("attendedTransfer result", data: res);
+    return res;
+  }
+
+  /// Complete the attended transfer: bridge the held call with the
+  /// consultation call. Both remote parties are connected and your
+  /// leg is dropped.
+  ///
+  /// Must have exactly 2 calls (one paused, one active).
+  /// Returns true if transfer was executed.
+  Future<bool> completeAttendedTransfer() async {
+    _log("completeAttendedTransfer");
+    final res = await _channel.invokeMethod("complete_attended_transfer");
+    _log("completeAttendedTransfer result", data: res);
+    return res;
+  }
+
+  /// Cancel the attended transfer: hang up the consultation call and
+  /// resume the original held call.
+  ///
+  /// Returns true if cancelled successfully.
+  Future<bool> cancelAttendedTransfer() async {
+    _log("cancelAttendedTransfer");
+    final res = await _channel.invokeMethod("cancel_attended_transfer");
+    _log("cancelAttendedTransfer result", data: res);
+    return res;
+  }
+
+  /// Get the number of active calls (useful for transfer UI state).
+  Future<int> getCallCount() async {
+    final res = await _channel.invokeMethod("get_call_count");
+    _log("getCallCount", data: res);
+    return res;
+  }
+
+  /// Check if the consultation call (2nd leg of attended transfer) is connected.
+  /// Returns true only when there are 2 calls: one paused + one streaming.
+  Future<bool> isConsultCallConnected() async {
+    final res = await _channel.invokeMethod("is_consult_connected");
+    _log("isConsultCallConnected", data: res);
     return res;
   }
 

@@ -1,14 +1,12 @@
 package com.spagreen.linphonesdk;
 
 import android.animation.ObjectAnimator;
+import android.animation.ValueAnimator;
 import android.app.Activity;
-import android.app.KeyguardManager;
-import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
-import android.media.AudioManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -21,30 +19,30 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.view.animation.AccelerateDecelerateInterpolator;
 import android.widget.Chronometer;
+import android.widget.EditText;
 import android.widget.FrameLayout;
-import android.widget.GridLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
-import org.linphone.core.Call;
-
 /**
- * Native Android active-call screen.
+ * Native Android active-call screen — creative, modern design.
  *
- * Launched when a call is connected (or for outgoing calls from the start).
+ * Launched when a call is connected (or for outgoing calls).
  * Works even when the Flutter app is terminated. All UI is built
- * programmatically — no XML layouts are required.
+ * programmatically — no XML layouts required.
  *
  * Features:
- * - Dark gradient background
- * - Caller avatar + name
- * - Chronometer timer showing call duration (persists across open/close)
- * - Action grid: Mute, Speaker, Keypad (+ 3 placeholder buttons)
+ * - Deep dark gradient background
+ * - Caller avatar with animated glow ring (blue → orange when on hold)
+ * - Chronometer (persists across re-creation)
+ * - Action grid: Mute, Speaker, Keypad, Hold — with proper Material icons
  * - Toggle-able DTMF keypad overlay
- * - Red hang-up button
- * - Polls call status and syncs mute/speaker state from LinPhoneHelper
+ * - Wide pill-shaped red hang-up button with phone-end icon
+ * - Real-time state sync (mute / speaker / hold)
+ * - "On Hold" pulsing banner
  */
 public class ActiveCallActivity extends Activity {
     private static final String TAG = "ActiveCallActivity";
@@ -56,22 +54,34 @@ public class ActiveCallActivity extends Activity {
     private Chronometer chronometer;
     private boolean isMuted = false;
     private boolean isSpeaker = false;
+    private boolean isOnHold = false;
+    private boolean callConnected = false;
     private LinearLayout dtmfPad;
     private boolean dtmfVisible = false;
 
-    // Action button references for toggling backgrounds
-    private FrameLayout muteCircle, speakerCircle, keypadCircle;
-    private TextView muteLabel, speakerLabel;
-    private TextView nameView;
+    // Action-button references
+    private FrameLayout muteCircle, speakerCircle, keypadCircle, holdCircle, transferCircle;
+    private ImageView muteIcon, speakerIcon, holdIcon;
+    private TextView muteLabel, speakerLabel, holdLabel;
+    private TextView nameView, statusView;
+    private View holdBanner;
+    private FrameLayout avatarGlowRing;
+
+    // Transfer dialog overlay
+    private FrameLayout transferOverlay;
 
     private static ActiveCallActivity currentInstance;
 
-    /** Dismiss the active call screen if it is showing */
+    /** Dismiss the active call screen if it is showing. */
     public static void finishIfRunning() {
         if (currentInstance != null && !currentInstance.isFinishing()) {
             currentInstance.finish();
         }
     }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Lifecycle
+    // ──────────────────────────────────────────────────────────────────
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -84,20 +94,14 @@ public class ActiveCallActivity extends Activity {
         currentInstance = this;
         setupWindowFlags();
 
-        // Resolve caller name: prefer intent extra, fall back to live call data
         String callerName = resolveCallerName(getIntent());
         String callerUri = getIntent().getStringExtra(EXTRA_CALLER_URI);
         if (callerUri == null)
             callerUri = "";
 
         setContentView(buildLayout(callerName, callerUri));
-
-        // Sync chronometer base to actual call duration (survives activity re-creation)
         syncChronometerToCall();
-
-        // Sync mute/speaker from LinPhoneHelper
         syncToggleStates();
-
         startTimerAndPoll();
     }
 
@@ -105,11 +109,9 @@ public class ActiveCallActivity extends Activity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        // Refresh caller name if a new intent arrives (e.g. tapping notification)
         String callerName = resolveCallerName(intent);
-        if (nameView != null && callerName != null) {
+        if (nameView != null && callerName != null)
             nameView.setText(callerName);
-        }
         syncChronometerToCall();
         syncToggleStates();
     }
@@ -131,431 +133,496 @@ public class ActiveCallActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        // Toggle DTMF pad off if visible, otherwise ignore
-        if (dtmfVisible)
+        if (transferVisible)
+            hideTransferDialog();
+        else if (dtmfVisible)
             toggleDtmfPad();
     }
 
-    // ==================================================================
-    // Resolve caller name from intent or live call
-    // ==================================================================
+    // ──────────────────────────────────────────────────────────────────
+    // Resolve caller name
+    // ──────────────────────────────────────────────────────────────────
 
     private String resolveCallerName(Intent intent) {
         String name = intent != null ? intent.getStringExtra(EXTRA_CALLER_NAME) : null;
         if (!TextUtils.isEmpty(name) && !"Unknown".equals(name))
             return name;
-
-        // Fall back to live call data from LinPhoneHelper
         LinPhoneHelper helper = LinPhoneHelper.getInstance();
         if (helper != null) {
-            String liveName = helper.getCurrentCallRemoteName();
-            if (!TextUtils.isEmpty(liveName))
-                return liveName;
+            String live = helper.getCurrentCallRemoteName();
+            if (!TextUtils.isEmpty(live))
+                return live;
         }
         return name != null ? name : "Unknown";
     }
 
-    // ==================================================================
-    // Sync chronometer to actual call duration
-    // ==================================================================
+    // ──────────────────────────────────────────────────────────────────
+    // Sync chronometer to real call duration
+    // Only starts once the call is actually connected/streaming.
+    // ──────────────────────────────────────────────────────────────────
 
     private void syncChronometerToCall() {
         LinPhoneHelper helper = LinPhoneHelper.getInstance();
-        if (helper != null && chronometer != null) {
-            int durationSec = helper.getCallDuration();
-            chronometer.setBase(SystemClock.elapsedRealtime() - (durationSec * 1000L));
-            chronometer.start();
+        if (helper == null || chronometer == null)
+            return;
+
+        if (!callConnected) {
+            // Check if call has moved past ringing into connected state
+            if (helper.isCallConnected() || helper.getCallDuration() > 0) {
+                callConnected = true;
+                int sec = helper.getCallDuration();
+                chronometer.setBase(SystemClock.elapsedRealtime() - (sec * 1000L));
+                chronometer.start();
+                chronometer.setVisibility(View.VISIBLE);
+                // Hide the pre-connection status once connected
+                if (statusView != null && !isOnHold) {
+                    statusView.setVisibility(View.GONE);
+                }
+            } else {
+                // Still ringing/dialing — show state label, don't tick
+                chronometer.stop();
+                chronometer.setText("00:00");
+                String label = helper.getCallStateLabel();
+                if (statusView != null && !label.isEmpty()) {
+                    statusView.setText(label);
+                    statusView.setTextColor(0xFF4facfe);
+                    statusView.setVisibility(View.VISIBLE);
+                }
+            }
+        } else {
+            // Already connected — keep syncing the base for accuracy
+            int sec = helper.getCallDuration();
+            chronometer.setBase(SystemClock.elapsedRealtime() - (sec * 1000L));
         }
     }
 
-    // ==================================================================
-    // Sync mute / speaker state from LinPhoneHelper
-    // ==================================================================
+    // ──────────────────────────────────────────────────────────────────
+    // Sync mute / speaker / hold
+    // ──────────────────────────────────────────────────────────────────
 
     private void syncToggleStates() {
         LinPhoneHelper helper = LinPhoneHelper.getInstance();
         if (helper == null)
             return;
 
-        boolean actualMuted = helper.isMuted();
-        boolean actualSpeaker = helper.isSpeakerEnabled();
+        boolean m = helper.isMuted();
+        boolean s = helper.isSpeakerEnabled();
+        boolean h = helper.isCallOnHold();
 
-        if (actualMuted != isMuted) {
-            isMuted = actualMuted;
-            updateMuteUI();
+        if (m != isMuted) {
+            isMuted = m;
+            applyCircleToggle(muteCircle, muteIcon, isMuted);
+            if (muteIcon != null)
+                muteIcon.setImageResource(res(isMuted ? "ic_mic_off" : "ic_mic_on"));
+            if (muteLabel != null)
+                muteLabel.setText(isMuted ? "Unmute" : "Mute");
         }
-        if (actualSpeaker != isSpeaker) {
-            isSpeaker = actualSpeaker;
-            updateSpeakerUI();
+        if (s != isSpeaker) {
+            isSpeaker = s;
+            applyCircleToggle(speakerCircle, speakerIcon, isSpeaker);
+            if (speakerIcon != null)
+                speakerIcon.setImageResource(res(isSpeaker ? "ic_hearing" : "ic_volume_up"));
+            if (speakerLabel != null)
+                speakerLabel.setText(isSpeaker ? "Earpiece" : "Speaker");
+        }
+        if (h != isOnHold) {
+            isOnHold = h;
+            applyCircleToggle(holdCircle, holdIcon, isOnHold);
+            refreshHoldVisuals();
         }
     }
 
-    private void updateMuteUI() {
-        if (muteCircle == null)
+    /** White circle = active, translucent circle = inactive. */
+    private void applyCircleToggle(FrameLayout circle, ImageView icon, boolean active) {
+        if (circle == null)
             return;
         GradientDrawable bg = new GradientDrawable();
         bg.setShape(GradientDrawable.OVAL);
-        bg.setColor(isMuted ? 0xFFFFFFFF : 0x33FFFFFF);
-        muteCircle.setBackground(bg);
-        if (muteCircle.getChildAt(0) instanceof ImageView) {
-            ((ImageView) muteCircle.getChildAt(0))
-                    .setColorFilter(isMuted ? 0xFF1a1a2e : Color.WHITE);
+        bg.setColor(active ? 0xFFFFFFFF : 0x33FFFFFF);
+        circle.setBackground(bg);
+        if (icon != null)
+            icon.setColorFilter(active ? 0xFF1a1a2e : Color.WHITE);
+    }
+
+    /** Update hold icon/label/banner/glow colour. */
+    private void refreshHoldVisuals() {
+        if (holdIcon != null)
+            holdIcon.setImageResource(res(isOnHold ? "ic_play_arrow" : "ic_pause"));
+        if (holdLabel != null)
+            holdLabel.setText(isOnHold ? "Resume" : "Hold");
+        if (holdBanner != null)
+            holdBanner.setVisibility(isOnHold ? View.VISIBLE : View.GONE);
+        if (statusView != null) {
+            statusView.setText(isOnHold ? "On Hold" : "");
+            statusView.setVisibility(isOnHold ? View.VISIBLE : View.GONE);
+        }
+        if (avatarGlowRing != null) {
+            GradientDrawable glow = new GradientDrawable();
+            glow.setShape(GradientDrawable.OVAL);
+            glow.setStroke(dp(3), isOnHold ? 0xFFFF9800 : 0xFF4facfe);
+            glow.setColor(Color.TRANSPARENT);
+            avatarGlowRing.setBackground(glow);
         }
     }
 
-    private void updateSpeakerUI() {
-        if (speakerCircle == null)
-            return;
-        GradientDrawable bg = new GradientDrawable();
-        bg.setShape(GradientDrawable.OVAL);
-        bg.setColor(isSpeaker ? 0xFFFFFFFF : 0x33FFFFFF);
-        speakerCircle.setBackground(bg);
-        if (speakerCircle.getChildAt(0) instanceof ImageView) {
-            ((ImageView) speakerCircle.getChildAt(0))
-                    .setColorFilter(isSpeaker ? 0xFF1a1a2e : Color.WHITE);
-        }
-    }
-
-    // ==================================================================
+    // ──────────────────────────────────────────────────────────────────
     // Window flags
-    // ==================================================================
+    // ──────────────────────────────────────────────────────────────────
 
     private void setupWindowFlags() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true);
             setTurnScreenOn(true);
         } else {
-            getWindow().addFlags(
-                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
-                            | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                    | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
         }
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-
         getWindow().getDecorView().setSystemUiVisibility(
-                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                        | View.SYSTEM_UI_FLAG_FULLSCREEN
-                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             getWindow().setStatusBarColor(Color.TRANSPARENT);
             getWindow().setNavigationBarColor(Color.TRANSPARENT);
         }
     }
 
-    // ==================================================================
-    // UI Layout
-    // ==================================================================
+    // ══════════════════════════════════════════════════════════════════
+    // BUILD LAYOUT
+    // ══════════════════════════════════════════════════════════════════
 
-    private View buildLayout(final String callerName, final String callerUri) {
+    private View buildLayout(String callerName, String callerUri) {
         FrameLayout root = new FrameLayout(this);
         root.setLayoutParams(new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[] { 0xFF0d0d1a, 0xFF141428, 0xFF1a1a3e, 0xFF0f1f3a }));
 
-        GradientDrawable bg = new GradientDrawable(
-                GradientDrawable.Orientation.TL_BR,
-                new int[] { 0xFF1a1a2e, 0xFF16213e, 0xFF0f3460, 0xFF1a1a2e });
-        root.setBackground(bg);
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setGravity(Gravity.CENTER_HORIZONTAL);
+        col.setPadding(dp(24), 0, dp(24), 0);
+        root.addView(col, matchWrap());
 
-        // Main content
-        LinearLayout content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.setGravity(Gravity.CENTER_HORIZONTAL);
-        content.setPadding(dp(24), 0, dp(24), 0);
-        root.addView(content, matchWrap());
+        spacer(col, 60);
 
-        addSpacer(content, 70);
+        // ── Avatar + glow ring ───────────────────────────────────────
+        col.addView(buildAvatarArea(callerName), centeredLP(dp(115), dp(115)));
 
-        // Avatar
-        int avatarSize = dp(90);
-        FrameLayout avatar = new FrameLayout(this);
-        GradientDrawable avatarBg = new GradientDrawable(
-                GradientDrawable.Orientation.TL_BR,
-                new int[] { 0xFF4facfe, 0xFF00f2fe });
-        avatarBg.setShape(GradientDrawable.OVAL);
-        avatar.setBackground(avatarBg);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP)
-            avatar.setElevation(dp(6));
+        spacer(col, 20);
 
-        TextView initials = new TextView(this);
-        initials.setText(getInitials(callerName));
-        initials.setTextColor(Color.WHITE);
-        initials.setTextSize(TypedValue.COMPLEX_UNIT_SP, 34);
-        initials.setTypeface(Typeface.DEFAULT_BOLD);
-        initials.setGravity(Gravity.CENTER);
-        avatar.addView(initials, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        // ── Caller name ──────────────────────────────────────────────
+        nameView = txt(callerName, Color.WHITE, 28, Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        col.addView(nameView, wrapCenter());
 
-        LinearLayout.LayoutParams avatarP = new LinearLayout.LayoutParams(avatarSize, avatarSize);
-        avatarP.gravity = Gravity.CENTER_HORIZONTAL;
-        content.addView(avatar, avatarP);
-
-        addSpacer(content, 20);
-
-        // Caller name
-        nameView = new TextView(this);
-        nameView.setText(callerName);
-        nameView.setTextColor(Color.WHITE);
-        nameView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26);
-        nameView.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        nameView.setGravity(Gravity.CENTER);
-        content.addView(nameView, wrapCenter());
-
-        // Caller URI
+        // ── URI ──────────────────────────────────────────────────────
         if (!callerUri.isEmpty()) {
-            addSpacer(content, 4);
-            TextView uriView = new TextView(this);
-            uriView.setText(callerUri);
-            uriView.setTextColor(0x80FFFFFF);
-            uriView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-            uriView.setGravity(Gravity.CENTER);
-            content.addView(uriView, wrapCenter());
+            spacer(col, 4);
+            col.addView(txt(callerUri, 0x66FFFFFF, 14, null), wrapCenter());
         }
 
-        addSpacer(content, 8);
+        spacer(col, 6);
 
-        // Timer (base set later in syncChronometerToCall)
+        // ── "On Hold" status ─────────────────────────────────────────
+        statusView = txt("", 0xFFFF9800, 15, Typeface.DEFAULT_BOLD);
+        statusView.setVisibility(View.GONE);
+        col.addView(statusView, wrapCenter());
+
+        spacer(col, 4);
+
+        // ── Timer ────────────────────────────────────────────────────
         chronometer = new Chronometer(this);
-        chronometer.setTextColor(0xB3FFFFFF);
+        chronometer.setTextColor(0x99FFFFFF);
         chronometer.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
         chronometer.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
         chronometer.setGravity(Gravity.CENTER);
-        chronometer.setFormat(null);
-        content.addView(chronometer, wrapCenter());
+        col.addView(chronometer, wrapCenter());
 
-        // Flex spacer
+        // ── Flex ─────────────────────────────────────────────────────
         View flex = new View(this);
-        LinearLayout.LayoutParams flexP = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0);
-        flexP.weight = 1;
-        content.addView(flex, flexP);
+        LinearLayout.LayoutParams fp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0);
+        fp.weight = 1;
+        col.addView(flex, fp);
 
-        // Action grid (2 rows x 3 cols)
-        content.addView(buildActionGrid(), wrapCenter());
+        // ── Hold banner ──────────────────────────────────────────────
+        holdBanner = buildHoldBanner();
+        col.addView(holdBanner, wrapCenter());
+        spacer(col, 14);
 
-        addSpacer(content, 30);
+        // ── Action grid ──────────────────────────────────────────────
+        col.addView(buildActionGrid(), wrapCenter());
 
-        // Hang up button
-        FrameLayout hangUp = new FrameLayout(this);
-        GradientDrawable hangBg = new GradientDrawable();
-        hangBg.setShape(GradientDrawable.OVAL);
-        hangBg.setColor(0xFFe53935);
-        hangUp.setBackground(hangBg);
+        spacer(col, 34);
 
-        ImageView hangIcon = new ImageView(this);
-        hangIcon.setImageResource(android.R.drawable.ic_menu_close_clear_cancel);
-        hangIcon.setColorFilter(Color.WHITE);
-        hangIcon.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        int hPad = dp(18);
-        hangIcon.setPadding(hPad, hPad, hPad, hPad);
-        hangUp.addView(hangIcon, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        // ── Hang-up pill ─────────────────────────────────────────────
+        col.addView(buildHangUpPill(), wrapCenter());
 
-        hangUp.setOnClickListener(v -> doHangUp());
-        LinearLayout.LayoutParams hangP = new LinearLayout.LayoutParams(dp(72), dp(72));
-        hangP.gravity = Gravity.CENTER_HORIZONTAL;
-        content.addView(hangUp, hangP);
+        spacer(col, 50);
 
-        addSpacer(content, 10);
-        TextView hangLabel = new TextView(this);
-        hangLabel.setText("Hang Up");
-        hangLabel.setTextColor(0xB3FFFFFF);
-        hangLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-        hangLabel.setGravity(Gravity.CENTER);
-        content.addView(hangLabel, wrapCenter());
-
-        addSpacer(content, 50);
-
-        // DTMF pad overlay (initially hidden)
+        // ── DTMF overlay ─────────────────────────────────────────────
         dtmfPad = buildDtmfPad();
         dtmfPad.setVisibility(View.GONE);
-        root.addView(dtmfPad, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        root.addView(dtmfPad, matchWrap());
+
+        // ── Transfer dialog overlay ──────────────────────────────────
+        transferOverlay = buildTransferOverlay();
+        transferOverlay.setVisibility(View.GONE);
+        root.addView(transferOverlay, matchWrap());
 
         return root;
     }
 
-    // ==================================================================
-    // Action grid
-    // ==================================================================
+    // ──────────────────────────────────────────────────────────────────
+    // Avatar area
+    // ──────────────────────────────────────────────────────────────────
+
+    private FrameLayout buildAvatarArea(String callerName) {
+        FrameLayout area = new FrameLayout(this);
+
+        // Glow ring
+        avatarGlowRing = new FrameLayout(this);
+        GradientDrawable glow = new GradientDrawable();
+        glow.setShape(GradientDrawable.OVAL);
+        glow.setStroke(dp(3), 0xFF4facfe);
+        glow.setColor(Color.TRANSPARENT);
+        avatarGlowRing.setBackground(glow);
+        area.addView(avatarGlowRing, centered(dp(115)));
+
+        // Pulse animation on the glow ring
+        ObjectAnimator pulse = ObjectAnimator.ofFloat(avatarGlowRing, "alpha", 1f, 0.35f, 1f);
+        pulse.setDuration(2400);
+        pulse.setRepeatCount(ValueAnimator.INFINITE);
+        pulse.setInterpolator(new AccelerateDecelerateInterpolator());
+        pulse.start();
+
+        // Inner avatar
+        int sz = dp(92);
+        FrameLayout av = new FrameLayout(this);
+        GradientDrawable avBg = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                new int[] { 0xFF4facfe, 0xFF00f2fe });
+        avBg.setShape(GradientDrawable.OVAL);
+        av.setBackground(avBg);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP)
+            av.setElevation(dp(8));
+
+        TextView init = txt(getInitials(callerName), Color.WHITE, 36, Typeface.DEFAULT_BOLD);
+        init.setGravity(Gravity.CENTER);
+        av.addView(init, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        area.addView(av, centered(sz));
+        return area;
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Hold banner
+    // ──────────────────────────────────────────────────────────────────
+
+    private View buildHoldBanner() {
+        LinearLayout b = new LinearLayout(this);
+        b.setOrientation(LinearLayout.HORIZONTAL);
+        b.setGravity(Gravity.CENTER);
+        b.setPadding(dp(16), dp(8), dp(16), dp(8));
+
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(dp(20));
+        bg.setColor(0x33FF9800);
+        bg.setStroke(dp(1), 0x66FF9800);
+        b.setBackground(bg);
+
+        ImageView ic = new ImageView(this);
+        ic.setImageResource(res("ic_pause"));
+        ic.setColorFilter(0xFFFF9800);
+        b.addView(ic, new LinearLayout.LayoutParams(dp(18), dp(18)));
+
+        TextView t = txt("  Call On Hold", 0xFFFF9800, 14, Typeface.DEFAULT_BOLD);
+        b.addView(t, wrapCenter());
+
+        ObjectAnimator a = ObjectAnimator.ofFloat(b, "alpha", 1f, 0.45f, 1f);
+        a.setDuration(1800);
+        a.setRepeatCount(ValueAnimator.INFINITE);
+        a.start();
+
+        b.setVisibility(View.GONE);
+        return b;
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Action grid (2 × 2)
+    // ──────────────────────────────────────────────────────────────────
 
     private LinearLayout buildActionGrid() {
-        LinearLayout grid = new LinearLayout(this);
-        grid.setOrientation(LinearLayout.VERTICAL);
-        grid.setGravity(Gravity.CENTER);
+        LinearLayout grid = vBox(Gravity.CENTER);
 
-        // Row 1: Mute, Keypad, Speaker
-        LinearLayout row1 = new LinearLayout(this);
-        row1.setOrientation(LinearLayout.HORIZONTAL);
-        row1.setGravity(Gravity.CENTER);
+        // Row 1: Mute · Speaker · Keypad
+        LinearLayout r1 = hBox(Gravity.CENTER);
 
-        View[] muteViews = buildActionButton(
-                android.R.drawable.ic_lock_silent_mode,
-                "Mute", () -> toggleMute());
-        muteCircle = (FrameLayout) muteViews[0];
-        muteLabel = ((TextView) ((LinearLayout) muteViews[1]).getChildAt(2));
-        row1.addView((View) muteViews[1],
-                new LinearLayout.LayoutParams(dp(100), ViewGroup.LayoutParams.WRAP_CONTENT));
+        View[] mv = actionBtn(res("ic_mic_on"), "Mute", this::toggleMute);
+        muteCircle = (FrameLayout) mv[0];
+        muteIcon = (ImageView) muteCircle.getChildAt(0);
+        muteLabel = (TextView) ((LinearLayout) mv[1]).getChildAt(2);
+        r1.addView(mv[1], new LinearLayout.LayoutParams(dp(90), ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        View[] kpViews = buildActionButton(
-                android.R.drawable.ic_input_get,
-                "Keypad", this::toggleDtmfPad);
-        keypadCircle = (FrameLayout) kpViews[0];
-        row1.addView((View) kpViews[1],
-                new LinearLayout.LayoutParams(dp(100), ViewGroup.LayoutParams.WRAP_CONTENT));
+        hSpacer(r1, 12);
 
-        View[] spkViews = buildActionButton(
-                android.R.drawable.ic_lock_silent_mode_off,
-                "Speaker", this::toggleSpeaker);
-        speakerCircle = (FrameLayout) spkViews[0];
-        speakerLabel = ((TextView) ((LinearLayout) spkViews[1]).getChildAt(2));
-        row1.addView((View) spkViews[1],
-                new LinearLayout.LayoutParams(dp(100), ViewGroup.LayoutParams.WRAP_CONTENT));
+        View[] sv = actionBtn(res("ic_volume_up"), "Speaker", this::toggleSpeaker);
+        speakerCircle = (FrameLayout) sv[0];
+        speakerIcon = (ImageView) speakerCircle.getChildAt(0);
+        speakerLabel = (TextView) ((LinearLayout) sv[1]).getChildAt(2);
+        r1.addView(sv[1], new LinearLayout.LayoutParams(dp(90), ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        grid.addView(row1, wrapCenter());
-        addSpacer(grid, 16);
+        hSpacer(r1, 12);
 
-        // Row 2: Add call, Video, Contacts (all disabled)
-        LinearLayout row2 = new LinearLayout(this);
-        row2.setOrientation(LinearLayout.HORIZONTAL);
-        row2.setGravity(Gravity.CENTER);
+        View[] kv = actionBtn(res("ic_dialpad"), "Keypad", this::toggleDtmfPad);
+        keypadCircle = (FrameLayout) kv[0];
+        r1.addView(kv[1], new LinearLayout.LayoutParams(dp(90), ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        row2.addView(buildDisabledButton("Add call"),
-                new LinearLayout.LayoutParams(dp(100), ViewGroup.LayoutParams.WRAP_CONTENT));
-        row2.addView(buildDisabledButton("Video"),
-                new LinearLayout.LayoutParams(dp(100), ViewGroup.LayoutParams.WRAP_CONTENT));
-        row2.addView(buildDisabledButton("Contacts"),
-                new LinearLayout.LayoutParams(dp(100), ViewGroup.LayoutParams.WRAP_CONTENT));
+        grid.addView(r1, wrapCenter());
+        spacer(grid, 16);
 
-        grid.addView(row2, wrapCenter());
+        // Row 2: Hold · Transfer
+        LinearLayout r2 = hBox(Gravity.CENTER);
+
+        View[] hv = actionBtn(res("ic_pause"), "Hold", this::toggleHold);
+        holdCircle = (FrameLayout) hv[0];
+        holdIcon = (ImageView) holdCircle.getChildAt(0);
+        holdLabel = (TextView) ((LinearLayout) hv[1]).getChildAt(2);
+        r2.addView(hv[1], new LinearLayout.LayoutParams(dp(90), ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        hSpacer(r2, 12);
+
+        View[] tv = actionBtn(res("ic_call_transfer"), "Transfer", this::showTransferDialog);
+        transferCircle = (FrameLayout) tv[0];
+        r2.addView(tv[1], new LinearLayout.LayoutParams(dp(90), ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        grid.addView(r2, wrapCenter());
         return grid;
     }
 
-    /**
-     * Returns [0] = FrameLayout circle, [1] = LinearLayout column
-     */
-    private View[] buildActionButton(int iconRes, String label, Runnable action) {
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-        col.setGravity(Gravity.CENTER_HORIZONTAL);
+    /** Builds a circular action button; returns [0]=circle, [1]=column. */
+    private View[] actionBtn(int iconRes, String label, Runnable action) {
+        LinearLayout col = vBox(Gravity.CENTER_HORIZONTAL);
 
+        int size = dp(62);
         FrameLayout circle = new FrameLayout(this);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setShape(GradientDrawable.OVAL);
-        bg.setColor(0x33FFFFFF);
-        circle.setBackground(bg);
+        GradientDrawable cbg = new GradientDrawable();
+        cbg.setShape(GradientDrawable.OVAL);
+        cbg.setColor(0x33FFFFFF);
+        circle.setBackground(cbg);
 
-        ImageView icon = new ImageView(this);
-        icon.setImageResource(iconRes);
-        icon.setColorFilter(Color.WHITE);
-        icon.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        int p = dp(14);
-        icon.setPadding(p, p, p, p);
-        circle.addView(icon, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        ImageView iv = new ImageView(this);
+        iv.setImageResource(iconRes);
+        iv.setColorFilter(Color.WHITE);
+        iv.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        int p = dp(16);
+        iv.setPadding(p, p, p, p);
+        circle.addView(iv, matchWrap());
 
-        circle.setOnClickListener(v -> action.run());
-        col.addView(circle, new LinearLayout.LayoutParams(dp(58), dp(58)));
+        circle.setOnClickListener(v -> {
+            v.animate().scaleX(0.85f).scaleY(0.85f).setDuration(80)
+                    .withEndAction(() -> v.animate().scaleX(1f).scaleY(1f).setDuration(80).start()).start();
+            action.run();
+        });
 
-        addSpacer(col, 6);
-
-        TextView tv = new TextView(this);
-        tv.setText(label);
-        tv.setTextColor(0xB3FFFFFF);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        tv.setGravity(Gravity.CENTER);
-        col.addView(tv, wrapCenter());
+        col.addView(circle, new LinearLayout.LayoutParams(size, size));
+        spacer(col, 6);
+        col.addView(txt(label, 0xB3FFFFFF, 12, null), wrapCenter());
 
         return new View[] { circle, col };
     }
 
-    private View buildDisabledButton(String label) {
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-        col.setGravity(Gravity.CENTER_HORIZONTAL);
+    // ──────────────────────────────────────────────────────────────────
+    // Hang-up circular button
+    // ──────────────────────────────────────────────────────────────────
 
+    private View buildHangUpPill() {
+        int size = dp(72);
         FrameLayout circle = new FrameLayout(this);
+
         GradientDrawable bg = new GradientDrawable();
         bg.setShape(GradientDrawable.OVAL);
-        bg.setColor(0x1AFFFFFF);
+        bg.setColors(new int[] { 0xFFe53935, 0xFFc62828 });
+        bg.setGradientType(GradientDrawable.LINEAR_GRADIENT);
+        bg.setOrientation(GradientDrawable.Orientation.TL_BR);
         circle.setBackground(bg);
-        col.addView(circle, new LinearLayout.LayoutParams(dp(58), dp(58)));
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP)
+            circle.setElevation(dp(8));
 
-        addSpacer(col, 6);
+        ImageView ic = new ImageView(this);
+        ic.setImageResource(res("ic_call_end"));
+        ic.setColorFilter(Color.WHITE);
+        ic.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        int p = dp(20);
+        ic.setPadding(p, p, p, p);
+        circle.addView(ic, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        TextView tv = new TextView(this);
-        tv.setText(label);
-        tv.setTextColor(0x4DFFFFFF);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        tv.setGravity(Gravity.CENTER);
-        col.addView(tv, wrapCenter());
+        circle.setOnClickListener(v -> v.animate().scaleX(0.85f).scaleY(0.85f).setDuration(100)
+                .withEndAction(() -> {
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(80).start();
+                    doHangUp();
+                }).start());
 
-        return col;
+        // Wrap in a container so centeredLP works with LinearLayout
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setGravity(Gravity.CENTER);
+        wrap.addView(circle, new LinearLayout.LayoutParams(size, size));
+        return wrap;
     }
 
-    // ==================================================================
-    // DTMF Pad
-    // ==================================================================
+    // ──────────────────────────────────────────────────────────────────
+    // DTMF pad
+    // ──────────────────────────────────────────────────────────────────
 
     private LinearLayout buildDtmfPad() {
-        LinearLayout overlay = new LinearLayout(this);
-        overlay.setOrientation(LinearLayout.VERTICAL);
-        overlay.setGravity(Gravity.CENTER);
-        overlay.setBackgroundColor(0xEE1a1a2e);
-        overlay.setClickable(true); // consume touches
+        LinearLayout ov = vBox(Gravity.CENTER);
+        ov.setBackgroundColor(0xF01a1a2e);
+        ov.setClickable(true);
 
-        String[][] keys = {
-                { "1", "2", "3" },
-                { "4", "5", "6" },
-                { "7", "8", "9" },
-                { "*", "0", "#" }
-        };
-
+        String[][] keys = { { "1", "2", "3" }, { "4", "5", "6" }, { "7", "8", "9" }, { "*", "0", "#" } };
         for (String[] row : keys) {
-            LinearLayout rowLayout = new LinearLayout(this);
-            rowLayout.setOrientation(LinearLayout.HORIZONTAL);
-            rowLayout.setGravity(Gravity.CENTER);
-
-            for (String key : row) {
-                TextView btn = new TextView(this);
-                btn.setText(key);
-                btn.setTextColor(Color.WHITE);
-                btn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 32);
-                btn.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+            LinearLayout rl = hBox(Gravity.CENTER);
+            for (String k : row) {
+                TextView btn = txt(k, Color.WHITE, 30, Typeface.create("sans-serif-light", Typeface.NORMAL));
                 btn.setGravity(Gravity.CENTER);
-
-                GradientDrawable btnBg = new GradientDrawable();
-                btnBg.setShape(GradientDrawable.OVAL);
-                btnBg.setColor(0x33FFFFFF);
-                btn.setBackground(btnBg);
-
-                btn.setOnClickListener(v -> sendDtmf(key));
+                GradientDrawable d = new GradientDrawable();
+                d.setShape(GradientDrawable.OVAL);
+                d.setColor(0x2AFFFFFF);
+                btn.setBackground(d);
+                btn.setOnClickListener(v -> {
+                    v.animate().scaleX(0.85f).scaleY(0.85f).setDuration(60)
+                            .withEndAction(() -> v.animate().scaleX(1f).scaleY(1f).setDuration(60).start()).start();
+                    sendDtmf(k);
+                });
                 LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(dp(72), dp(72));
-                bp.setMargins(dp(12), dp(8), dp(12), dp(8));
-                rowLayout.addView(btn, bp);
+                bp.setMargins(dp(10), dp(7), dp(10), dp(7));
+                rl.addView(btn, bp);
             }
-            overlay.addView(rowLayout, wrapCenter());
+            ov.addView(rl, wrapCenter());
         }
 
-        addSpacer(overlay, 20);
+        spacer(ov, 24);
 
         // Close button
-        TextView close = new TextView(this);
-        close.setText("Close");
-        close.setTextColor(0xFF4facfe);
-        close.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        TextView close = txt("Close Keypad", 0xFF4facfe, 17, Typeface.DEFAULT_BOLD);
         close.setGravity(Gravity.CENTER);
+        close.setPadding(dp(24), dp(10), dp(24), dp(10));
+        GradientDrawable cb = new GradientDrawable();
+        cb.setCornerRadius(dp(20));
+        cb.setStroke(dp(1), 0xFF4facfe);
+        cb.setColor(0x1A4facfe);
+        close.setBackground(cb);
         close.setOnClickListener(v -> toggleDtmfPad());
-        overlay.addView(close, wrapCenter());
+        ov.addView(close, wrapCenter());
 
-        return overlay;
+        return ov;
     }
 
     private void sendDtmf(String key) {
-        LinPhoneHelper helper = LinPhoneHelper.getInstance();
-        if (helper != null && key != null && !key.isEmpty())
-            helper.sendDtmf(key.charAt(0));
+        LinPhoneHelper h = LinPhoneHelper.getInstance();
+        if (h != null && key != null && !key.isEmpty())
+            h.sendDtmf(key.charAt(0));
     }
 
     private void toggleDtmfPad() {
@@ -563,56 +630,472 @@ public class ActiveCallActivity extends Activity {
         dtmfPad.setVisibility(dtmfVisible ? View.VISIBLE : View.GONE);
     }
 
-    // ==================================================================
-    // Toggle actions
-    // ==================================================================
+    // ──────────────────────────────────────────────────────────────────
+    // Transfer Dialog — Creative Tabbed UI
+    // ──────────────────────────────────────────────────────────────────
 
-    private void toggleMute() {
-        LinPhoneHelper helper = LinPhoneHelper.getInstance();
-        if (helper == null)
-            return;
-        helper.toggleMute();
-        isMuted = helper.isMuted();
-        updateMuteUI();
-    }
+    private boolean transferVisible = false;
+    private int selectedTransferTab = 0; // 0 = Blind, 1 = Attended
+    private boolean consultationInProgress = false;
+    private LinearLayout completeBtnRef; // held reference to enable/disable
 
-    private void toggleSpeaker() {
-        LinPhoneHelper helper = LinPhoneHelper.getInstance();
-        if (helper == null)
-            return;
-        helper.toggleSpeaker();
-        // Optimistic UI: flip immediately
-        isSpeaker = !isSpeaker;
-        updateSpeakerUI();
-        // Then verify actual state after the audio route change settles
-        if (handler != null) {
-            handler.postDelayed(() -> {
-                LinPhoneHelper h = LinPhoneHelper.getInstance();
-                if (h != null) {
-                    boolean actual = h.isSpeakerEnabled();
-                    if (actual != isSpeaker) {
-                        isSpeaker = actual;
-                        updateSpeakerUI();
-                    }
-                }
-            }, 300);
+    private void showTransferDialog() {
+        transferVisible = true;
+        if (transferOverlay != null) {
+            transferOverlay.setVisibility(View.VISIBLE);
+            transferOverlay.setAlpha(0f);
+            transferOverlay.animate().alpha(1f).setDuration(200).start();
         }
     }
 
-    // ==================================================================
+    private void hideTransferDialog() {
+        transferVisible = false;
+        consultationInProgress = false;
+        if (transferOverlay != null) {
+            transferOverlay.animate().alpha(0f).setDuration(150)
+                    .withEndAction(() -> transferOverlay.setVisibility(View.GONE)).start();
+        }
+    }
+
+    private FrameLayout buildTransferOverlay() {
+        FrameLayout overlay = new FrameLayout(this);
+        overlay.setBackgroundColor(0xF01a1a2e);
+        overlay.setClickable(true); // consume touch
+
+        LinearLayout container = vBox(Gravity.CENTER);
+        container.setPadding(dp(28), dp(60), dp(28), dp(40));
+
+        // ── Header ───────────────────────────────────────────────────
+        LinearLayout header = hBox(Gravity.CENTER_VERTICAL);
+
+        ImageView transferIcon = new ImageView(this);
+        transferIcon.setImageResource(res("ic_call_transfer"));
+        transferIcon.setColorFilter(0xFF4facfe);
+        header.addView(transferIcon, new LinearLayout.LayoutParams(dp(28), dp(28)));
+
+        hSpacer(header, 10);
+
+        TextView title = txt("Transfer Call", Color.WHITE, 24, Typeface.create("sans-serif-medium", Typeface.BOLD));
+        header.addView(title, wrapCenter());
+
+        container.addView(header, wrapCenter());
+        spacer(container, 8);
+
+        TextView subtitle = txt("Choose transfer type", 0x99FFFFFF, 14, null);
+        container.addView(subtitle, wrapCenter());
+        spacer(container, 24);
+
+        // ── Tab bar ──────────────────────────────────────────────────
+        LinearLayout tabBar = hBox(Gravity.CENTER);
+        tabBar.setPadding(dp(4), dp(4), dp(4), dp(4));
+        GradientDrawable tabBarBg = new GradientDrawable();
+        tabBarBg.setCornerRadius(dp(16));
+        tabBarBg.setColor(0x1AFFFFFF);
+        tabBar.setBackground(tabBarBg);
+
+        // Content panels (we build both, show one at a time)
+        LinearLayout blindPanel = buildBlindTransferPanel();
+        LinearLayout attendedPanel = buildAttendedTransferPanel();
+        attendedPanel.setVisibility(View.GONE);
+
+        // Tab buttons
+        TextView blindTab = buildTabButton("Blind", true);
+        TextView attendedTab = buildTabButton("Attended", false);
+
+        blindTab.setOnClickListener(v -> {
+            if (selectedTransferTab == 0)
+                return;
+            selectedTransferTab = 0;
+            applyTabStyle(blindTab, true);
+            applyTabStyle(attendedTab, false);
+            blindPanel.setVisibility(View.VISIBLE);
+            attendedPanel.setVisibility(View.GONE);
+        });
+        attendedTab.setOnClickListener(v -> {
+            if (selectedTransferTab == 1)
+                return;
+            selectedTransferTab = 1;
+            applyTabStyle(attendedTab, true);
+            applyTabStyle(blindTab, false);
+            attendedPanel.setVisibility(View.VISIBLE);
+            blindPanel.setVisibility(View.GONE);
+        });
+
+        LinearLayout.LayoutParams tabLP = new LinearLayout.LayoutParams(0, dp(42));
+        tabLP.weight = 1;
+        tabLP.setMargins(dp(2), 0, dp(2), 0);
+        tabBar.addView(blindTab, tabLP);
+        tabBar.addView(attendedTab, new LinearLayout.LayoutParams(tabLP));
+
+        container.addView(tabBar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        spacer(container, 24);
+
+        // ── Panels ───────────────────────────────────────────────────
+        container.addView(blindPanel, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        container.addView(attendedPanel, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // ── Flex spacer ──────────────────────────────────────────────
+        View flex = new View(this);
+        LinearLayout.LayoutParams fp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0);
+        fp.weight = 1;
+        container.addView(flex, fp);
+
+        // ── Close button ─────────────────────────────────────────────
+        TextView close = txt("Cancel", 0xFF4facfe, 16, Typeface.DEFAULT_BOLD);
+        close.setGravity(Gravity.CENTER);
+        close.setPadding(dp(32), dp(12), dp(32), dp(12));
+        GradientDrawable closeBg = new GradientDrawable();
+        closeBg.setCornerRadius(dp(24));
+        closeBg.setStroke(dp(1), 0xFF4facfe);
+        closeBg.setColor(0x1A4facfe);
+        close.setBackground(closeBg);
+        close.setOnClickListener(v -> hideTransferDialog());
+        container.addView(close, wrapCenter());
+
+        overlay.addView(container, matchWrap());
+        return overlay;
+    }
+
+    private TextView buildTabButton(String label, boolean active) {
+        TextView tab = txt(label, Color.WHITE, 15, Typeface.DEFAULT_BOLD);
+        tab.setGravity(Gravity.CENTER);
+        applyTabStyle(tab, active);
+        return tab;
+    }
+
+    private void applyTabStyle(TextView tab, boolean active) {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(dp(12));
+        if (active) {
+            bg.setColor(0xFF4facfe);
+            tab.setTextColor(0xFF0d0d1a);
+        } else {
+            bg.setColor(Color.TRANSPARENT);
+            tab.setTextColor(0x99FFFFFF);
+        }
+        tab.setBackground(bg);
+    }
+
+    // ── Blind Transfer Panel ─────────────────────────────────────────
+
+    private LinearLayout buildBlindTransferPanel() {
+        LinearLayout panel = vBox(Gravity.CENTER_HORIZONTAL);
+
+        // Info card
+        LinearLayout info = buildInfoCard(
+                "Blind Transfer",
+                "Transfer the call immediately without speaking to the recipient first. " +
+                        "The caller will be connected directly to the destination.",
+                0xFF4facfe);
+        panel.addView(info, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        spacer(panel, 20);
+
+        // Phone input
+        EditText input = buildPhoneInput("Enter destination number");
+        panel.addView(input, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        spacer(panel, 20);
+
+        // Transfer button
+        LinearLayout btn = buildActionButton("Transfer Now", 0xFF4facfe, 0xFF00c6ff, () -> {
+            String dest = input.getText().toString().trim();
+            if (dest.isEmpty()) {
+                input.setHintTextColor(0xFFe53935);
+                input.setHint("Please enter a number!");
+                handler.postDelayed(() -> {
+                    input.setHintTextColor(0x66FFFFFF);
+                    input.setHint("Enter destination number");
+                }, 2000);
+                return;
+            }
+            LinPhoneHelper h = LinPhoneHelper.getInstance();
+            if (h != null) {
+                boolean ok = h.blindTransfer(dest);
+                if (ok) {
+                    hideTransferDialog();
+                }
+            }
+        });
+        panel.addView(btn, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
+
+        return panel;
+    }
+
+    // ── Attended Transfer Panel ──────────────────────────────────────
+
+    private LinearLayout buildAttendedTransferPanel() {
+        LinearLayout panel = vBox(Gravity.CENTER_HORIZONTAL);
+
+        // Info card
+        LinearLayout info = buildInfoCard(
+                "Attended Transfer",
+                "First speak with the recipient, then transfer the call. " +
+                        "The original caller is placed on hold while you consult.",
+                0xFFFF9800);
+        panel.addView(info, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        spacer(panel, 20);
+
+        // Phone input
+        EditText input = buildPhoneInput("Enter consult number");
+        panel.addView(input, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        spacer(panel, 16);
+
+        // Status label (hidden until consultation starts)
+        TextView consultStatus = txt("", 0xFFFF9800, 14, Typeface.DEFAULT_BOLD);
+        consultStatus.setVisibility(View.GONE);
+        panel.addView(consultStatus, wrapCenter());
+        spacer(panel, 16);
+
+        // Action buttons container — swaps between "Start Consult" and "Complete /
+        // Cancel"
+        LinearLayout btnContainer = vBox(Gravity.CENTER_HORIZONTAL);
+
+        // Start consultation button
+        LinearLayout startBtn = buildActionButton("Start Consultation", 0xFFFF9800, 0xFFffc107, () -> {
+            String dest = input.getText().toString().trim();
+            if (dest.isEmpty()) {
+                input.setHintTextColor(0xFFe53935);
+                input.setHint("Please enter a number!");
+                handler.postDelayed(() -> {
+                    input.setHintTextColor(0x66FFFFFF);
+                    input.setHint("Enter consult number");
+                }, 2000);
+                return;
+            }
+            LinPhoneHelper h = LinPhoneHelper.getInstance();
+            if (h != null) {
+                boolean ok = h.attendedTransfer(dest);
+                if (ok) {
+                    consultationInProgress = true;
+                    consultStatus.setText("Consulting " + dest + "…");
+                    consultStatus.setVisibility(View.VISIBLE);
+                    input.setEnabled(false);
+                    // Rebuild button area
+                    rebuildConsultButtons(btnContainer, consultStatus, input);
+                }
+            }
+        });
+        btnContainer.addView(startBtn, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
+
+        panel.addView(btnContainer, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        return panel;
+    }
+
+    private void rebuildConsultButtons(LinearLayout container, TextView status, EditText input) {
+        container.removeAllViews();
+
+        // Complete Transfer button (green) — DISABLED until consult call connects
+        LinearLayout completeBtn = buildActionButton("Waiting for answer…", 0xFF555555, 0xFF444444, () -> {
+            // Only allow if consult is connected
+            LinPhoneHelper h = LinPhoneHelper.getInstance();
+            if (h != null && h.isConsultCallConnected()) {
+                boolean ok = h.completeAttendedTransfer();
+                if (ok) {
+                    hideTransferDialog();
+                }
+            }
+        });
+        completeBtn.setAlpha(0.4f);
+        completeBtn.setEnabled(false);
+        completeBtnRef = completeBtn;
+        container.addView(completeBtn, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
+
+        spacer(container, 10);
+
+        // Cancel & Resume button (red) — always enabled
+        LinearLayout cancelBtn = buildActionButton("Cancel & Resume", 0xFFe53935, 0xFFb71c1c, () -> {
+            LinPhoneHelper h = LinPhoneHelper.getInstance();
+            if (h != null) {
+                h.cancelAttendedTransfer();
+            }
+            consultationInProgress = false;
+            completeBtnRef = null;
+            hideTransferDialog();
+        });
+        container.addView(cancelBtn, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
+    }
+
+    // ── Shared dialog helpers ────────────────────────────────────────
+
+    private LinearLayout buildInfoCard(String titleText, String descText, int accentColor) {
+        LinearLayout card = vBox(Gravity.START);
+        card.setPadding(dp(16), dp(14), dp(16), dp(14));
+
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(dp(16));
+        bg.setColor(0x0DFFFFFF);
+        bg.setStroke(dp(1), accentColor & 0x33FFFFFF | (accentColor & 0x00FFFFFF));
+        card.setBackground(bg);
+
+        // Accent bar + title row
+        LinearLayout row = hBox(Gravity.CENTER_VERTICAL);
+        View bar = new View(this);
+        GradientDrawable barBg = new GradientDrawable();
+        barBg.setCornerRadius(dp(2));
+        barBg.setColor(accentColor);
+        bar.setBackground(barBg);
+        row.addView(bar, new LinearLayout.LayoutParams(dp(3), dp(18)));
+        hSpacer(row, 8);
+        row.addView(txt(titleText, accentColor, 16, Typeface.DEFAULT_BOLD), wrapCenter());
+        card.addView(row, wrapCenter());
+
+        spacer(card, 8);
+
+        TextView desc = txt(descText, 0x99FFFFFF, 13, null);
+        desc.setGravity(Gravity.START);
+        desc.setLineSpacing(dp(2), 1f);
+        card.addView(desc, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        return card;
+    }
+
+    private EditText buildPhoneInput(String hint) {
+        EditText input = new EditText(this);
+        input.setHint(hint);
+        input.setHintTextColor(0x66FFFFFF);
+        input.setTextColor(Color.WHITE);
+        input.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        input.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+        input.setGravity(Gravity.CENTER);
+        input.setSingleLine(true);
+        input.setInputType(android.text.InputType.TYPE_CLASS_PHONE);
+        input.setPadding(dp(20), dp(14), dp(20), dp(14));
+
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(dp(16));
+        bg.setColor(0x12FFFFFF);
+        bg.setStroke(dp(1), 0x33FFFFFF);
+        input.setBackground(bg);
+
+        // Focus highlight
+        input.setOnFocusChangeListener((v, hasFocus) -> {
+            GradientDrawable focusBg = new GradientDrawable();
+            focusBg.setCornerRadius(dp(16));
+            focusBg.setColor(0x12FFFFFF);
+            focusBg.setStroke(dp(1), hasFocus ? 0xFF4facfe : 0x33FFFFFF);
+            input.setBackground(focusBg);
+        });
+
+        return input;
+    }
+
+    private LinearLayout buildActionButton(String label, int colorStart, int colorEnd, Runnable action) {
+        LinearLayout btn = hBox(Gravity.CENTER);
+        btn.setPadding(dp(20), dp(12), dp(20), dp(12));
+
+        GradientDrawable bg = new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[] { colorStart, colorEnd });
+        bg.setCornerRadius(dp(16));
+        btn.setBackground(bg);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP)
+            btn.setElevation(dp(4));
+
+        ImageView ic = new ImageView(this);
+        ic.setImageResource(res("ic_call_transfer"));
+        ic.setColorFilter(Color.WHITE);
+        btn.addView(ic, new LinearLayout.LayoutParams(dp(20), dp(20)));
+
+        hSpacer(btn, 10);
+
+        TextView labelView = txt(label, Color.WHITE, 16, Typeface.DEFAULT_BOLD);
+        btn.addView(labelView, wrapCenter());
+
+        btn.setOnClickListener(v -> {
+            v.animate().scaleX(0.96f).scaleY(0.96f).setDuration(80)
+                    .withEndAction(() -> v.animate().scaleX(1f).scaleY(1f).setDuration(80).start()).start();
+            action.run();
+        });
+
+        return btn;
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Toggle actions
+    // ──────────────────────────────────────────────────────────────────
+
+    private void toggleMute() {
+        LinPhoneHelper h = LinPhoneHelper.getInstance();
+        if (h == null)
+            return;
+        h.toggleMute();
+        isMuted = h.isMuted();
+        applyCircleToggle(muteCircle, muteIcon, isMuted);
+        if (muteIcon != null)
+            muteIcon.setImageResource(res(isMuted ? "ic_mic_off" : "ic_mic_on"));
+        if (muteLabel != null)
+            muteLabel.setText(isMuted ? "Unmute" : "Mute");
+    }
+
+    private void toggleSpeaker() {
+        LinPhoneHelper h = LinPhoneHelper.getInstance();
+        if (h == null)
+            return;
+        h.toggleSpeaker();
+        isSpeaker = !isSpeaker;
+        applyCircleToggle(speakerCircle, speakerIcon, isSpeaker);
+        if (speakerIcon != null)
+            speakerIcon.setImageResource(res(isSpeaker ? "ic_hearing" : "ic_volume_up"));
+        if (speakerLabel != null)
+            speakerLabel.setText(isSpeaker ? "Earpiece" : "Speaker");
+        handler.postDelayed(() -> {
+            LinPhoneHelper hp = LinPhoneHelper.getInstance();
+            if (hp != null) {
+                boolean actual = hp.isSpeakerEnabled();
+                if (actual != isSpeaker) {
+                    isSpeaker = actual;
+                    applyCircleToggle(speakerCircle, speakerIcon, isSpeaker);
+                    if (speakerIcon != null)
+                        speakerIcon.setImageResource(res(isSpeaker ? "ic_hearing" : "ic_volume_up"));
+                    if (speakerLabel != null)
+                        speakerLabel.setText(isSpeaker ? "Earpiece" : "Speaker");
+                }
+            }
+        }, 400);
+    }
+
+    private void toggleHold() {
+        LinPhoneHelper h = LinPhoneHelper.getInstance();
+        if (h == null)
+            return;
+        h.toggleHold();
+        handler.postDelayed(() -> {
+            LinPhoneHelper hp = LinPhoneHelper.getInstance();
+            if (hp != null) {
+                isOnHold = hp.isCallOnHold();
+                applyCircleToggle(holdCircle, holdIcon, isOnHold);
+                refreshHoldVisuals();
+            }
+        }, 500);
+    }
+
+    // ──────────────────────────────────────────────────────────────────
     // Hang up
-    // ==================================================================
+    // ──────────────────────────────────────────────────────────────────
 
     private void doHangUp() {
-        LinPhoneHelper helper = LinPhoneHelper.getInstance();
-        if (helper != null)
-            helper.hangUp();
+        LinPhoneHelper h = LinPhoneHelper.getInstance();
+        if (h != null)
+            h.hangUp();
         finish();
     }
 
-    // ==================================================================
-    // Timer & call state polling
-    // ==================================================================
+    // ──────────────────────────────────────────────────────────────────
+    // Polling
+    // ──────────────────────────────────────────────────────────────────
 
     private void startTimerAndPoll() {
         handler.postDelayed(new Runnable() {
@@ -620,47 +1103,117 @@ public class ActiveCallActivity extends Activity {
             public void run() {
                 if (isFinishing())
                     return;
-                LinPhoneHelper helper = LinPhoneHelper.getInstance();
-                if (helper == null || !helper.hasActiveCall()) {
+                LinPhoneHelper h = LinPhoneHelper.getInstance();
+                if (h == null || !h.hasActiveCall()) {
                     finish();
                     return;
                 }
-                // Sync mute/speaker state from the source of truth (LinPhoneHelper)
+                syncChronometerToCall();
                 syncToggleStates();
-                handler.postDelayed(this, 1500);
+                syncConsultButton(h);
+                handler.postDelayed(this, 1000);
             }
-        }, 1500);
+        }, 1000);
     }
 
-    // ==================================================================
-    // Helpers
-    // ==================================================================
+    /**
+     * Enable the "Complete Transfer" button once the consultation call connects.
+     */
+    private void syncConsultButton(LinPhoneHelper h) {
+        if (!consultationInProgress || completeBtnRef == null)
+            return;
+        boolean connected = h.isConsultCallConnected();
+        if (connected && !completeBtnRef.isEnabled()) {
+            completeBtnRef.setEnabled(true);
+            completeBtnRef.setAlpha(1f);
+            // Re-skin to green gradient
+            GradientDrawable bg = new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                    new int[] { 0xFF4caf50, 0xFF2e7d32 });
+            bg.setCornerRadius(dp(16));
+            completeBtnRef.setBackground(bg);
+            // Update label text
+            for (int i = 0; i < completeBtnRef.getChildCount(); i++) {
+                View child = completeBtnRef.getChildAt(i);
+                if (child instanceof TextView) {
+                    ((TextView) child).setText("Complete Transfer");
+                }
+            }
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Tiny helpers
+    // ══════════════════════════════════════════════════════════════════
+
+    private int res(String name) {
+        return getResources().getIdentifier(name, "drawable", getPackageName());
+    }
 
     private String getInitials(String name) {
         if (name == null || name.isEmpty())
             return "?";
-        String[] parts = name.trim().split("\\s+");
-        if (parts.length >= 2)
-            return (parts[0].substring(0, 1) + parts[1].substring(0, 1)).toUpperCase();
+        String[] p = name.trim().split("\\s+");
+        if (p.length >= 2)
+            return (p[0].substring(0, 1) + p[1].substring(0, 1)).toUpperCase();
         return name.substring(0, 1).toUpperCase();
     }
 
-    private int dp(int value) {
-        return (int) TypedValue.applyDimension(
-                TypedValue.COMPLEX_UNIT_DIP, value, getResources().getDisplayMetrics());
+    private int dp(int v) {
+        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v,
+                getResources().getDisplayMetrics());
     }
 
-    private void addSpacer(LinearLayout parent, int heightDp) {
-        View v = new View(this);
-        parent.addView(v, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(heightDp)));
+    private TextView txt(String text, int color, int sp, Typeface tf) {
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextColor(color);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
+        if (tf != null)
+            tv.setTypeface(tf);
+        tv.setGravity(Gravity.CENTER);
+        return tv;
+    }
+
+    private LinearLayout vBox(int gravity) {
+        LinearLayout l = new LinearLayout(this);
+        l.setOrientation(LinearLayout.VERTICAL);
+        l.setGravity(gravity);
+        return l;
+    }
+
+    private LinearLayout hBox(int gravity) {
+        LinearLayout l = new LinearLayout(this);
+        l.setOrientation(LinearLayout.HORIZONTAL);
+        l.setGravity(gravity);
+        return l;
+    }
+
+    private void spacer(LinearLayout p, int hDp) {
+        p.addView(new View(this), new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(hDp)));
+    }
+
+    private void hSpacer(LinearLayout p, int wDp) {
+        p.addView(new View(this), new LinearLayout.LayoutParams(dp(wDp), dp(1)));
     }
 
     private LinearLayout.LayoutParams wrapCenter() {
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        p.gravity = Gravity.CENTER_HORIZONTAL;
-        return p;
+        lp.gravity = Gravity.CENTER_HORIZONTAL;
+        return lp;
+    }
+
+    private LinearLayout.LayoutParams centeredLP(int w, int h) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(w, h);
+        lp.gravity = Gravity.CENTER_HORIZONTAL;
+        return lp;
+    }
+
+    private FrameLayout.LayoutParams centered(int size) {
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(size, size);
+        lp.gravity = Gravity.CENTER;
+        return lp;
     }
 
     private FrameLayout.LayoutParams matchWrap() {

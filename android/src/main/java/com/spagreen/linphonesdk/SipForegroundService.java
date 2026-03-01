@@ -21,13 +21,13 @@ import org.linphone.core.TransportType;
 
 /**
  * Persistent foreground service that:
- *   1. Owns the Linphone Core (via LinPhoneHelper singleton)
- *   2. Stores credentials and auto-re-registers on restart
- *   3. Shows a Samsung-style in-call notification with icon buttons
- *      (Mute / Speaker / Hang Up) — minimal notification when idle
- *   4. Launches native IncomingCallActivity directly (no notification)
- *   5. Registration watchdog: checks every 3s & refreshes when unregistered
- *   6. Emits JSON call data via LinPhoneHelper → Flutter EventChannel
+ * 1. Owns the Linphone Core (via LinPhoneHelper singleton)
+ * 2. Stores credentials and auto-re-registers on restart
+ * 3. Shows a Samsung-style in-call notification with icon buttons
+ * (Mute / Speaker / Hang Up) — minimal notification when idle
+ * 4. Launches native IncomingCallActivity directly (no notification)
+ * 5. Registration watchdog: checks every 3s & refreshes when unregistered
+ * 6. Emits JSON call data via LinPhoneHelper → Flutter EventChannel
  */
 public class SipForegroundService extends Service {
     private static final String TAG = "SipForegroundService";
@@ -41,29 +41,29 @@ public class SipForegroundService extends Service {
 
     // Actions
     public static final String ACTION_START_AVAILABLE = "com.spagreen.linphonesdk.START_AVAILABLE";
-    public static final String ACTION_START_CALL      = "com.spagreen.linphonesdk.START_CALL";
-    public static final String ACTION_STOP_CALL       = "com.spagreen.linphonesdk.STOP_CALL";
-    public static final String ACTION_HANG_UP         = "com.spagreen.linphonesdk.HANG_UP";
-    public static final String ACTION_ANSWER          = "com.spagreen.linphonesdk.ANSWER";
-    public static final String ACTION_REJECT          = "com.spagreen.linphonesdk.REJECT";
-    public static final String ACTION_LOGIN           = "com.spagreen.linphonesdk.LOGIN";
-    public static final String ACTION_MUTE            = "com.spagreen.linphonesdk.MUTE";
-    public static final String ACTION_SPEAKER         = "com.spagreen.linphonesdk.SPEAKER";
-    public static final String ACTION_STOP_SERVICE    = "com.spagreen.linphonesdk.STOP_SERVICE";
+    public static final String ACTION_START_CALL = "com.spagreen.linphonesdk.START_CALL";
+    public static final String ACTION_STOP_CALL = "com.spagreen.linphonesdk.STOP_CALL";
+    public static final String ACTION_HANG_UP = "com.spagreen.linphonesdk.HANG_UP";
+    public static final String ACTION_ANSWER = "com.spagreen.linphonesdk.ANSWER";
+    public static final String ACTION_REJECT = "com.spagreen.linphonesdk.REJECT";
+    public static final String ACTION_LOGIN = "com.spagreen.linphonesdk.LOGIN";
+    public static final String ACTION_MUTE = "com.spagreen.linphonesdk.MUTE";
+    public static final String ACTION_SPEAKER = "com.spagreen.linphonesdk.SPEAKER";
+    public static final String ACTION_STOP_SERVICE = "com.spagreen.linphonesdk.STOP_SERVICE";
 
     // Extras
-    public static final String EXTRA_USERNAME    = "username";
-    public static final String EXTRA_CALLER      = "caller";
+    public static final String EXTRA_USERNAME = "username";
+    public static final String EXTRA_CALLER = "caller";
     public static final String EXTRA_CALLER_NAME = "caller_name";
-    public static final String EXTRA_DOMAIN      = "domain";
-    public static final String EXTRA_PASSWORD    = "password";
-    public static final String EXTRA_TRANSPORT   = "transport";
+    public static final String EXTRA_DOMAIN = "domain";
+    public static final String EXTRA_PASSWORD = "password";
+    public static final String EXTRA_TRANSPORT = "transport";
 
     // Credential storage
-    private static final String CRED_PREFS     = "sip_credentials";
-    private static final String CRED_USERNAME  = "username";
-    private static final String CRED_DOMAIN    = "domain";
-    private static final String CRED_PASSWORD  = "password";
+    private static final String CRED_PREFS = "sip_credentials";
+    private static final String CRED_USERNAME = "username";
+    private static final String CRED_DOMAIN = "domain";
+    private static final String CRED_PASSWORD = "password";
     private static final String CRED_TRANSPORT = "transport";
 
     private PowerManager.WakeLock wakeLock;
@@ -106,19 +106,25 @@ public class SipForegroundService extends Service {
 
     // Static reference
     private static SipForegroundService instance;
-    public static SipForegroundService getInstance() { return instance; }
+
+    public static SipForegroundService getInstance() {
+        return instance;
+    }
 
     // ------------------------------------------------------------------
     // Static helpers – called from LinPhoneHelper / MethodChannelHandler
     // ------------------------------------------------------------------
 
-    public static void start(Context context) { start(context, null); }
+    public static void start(Context context) {
+        start(context, null);
+    }
 
     public static void start(Context context, String username) {
         try {
             Intent intent = new Intent(context, SipForegroundService.class);
             intent.setAction(ACTION_START_AVAILABLE);
-            if (username != null) intent.putExtra(EXTRA_USERNAME, username);
+            if (username != null)
+                intent.putExtra(EXTRA_USERNAME, username);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent);
             } else {
@@ -142,7 +148,7 @@ public class SipForegroundService extends Service {
 
     /** Store credentials and start service with login action */
     public static void loginViaService(Context context, String username, String domain,
-                                       String password, String transport) {
+            String password, String transport) {
         try {
             Intent intent = new Intent(context, SipForegroundService.class);
             intent.setAction(ACTION_LOGIN);
@@ -223,7 +229,8 @@ public class SipForegroundService extends Service {
     /** Update registration state and refresh the idle notification */
     public static void updateRegistrationState(String state) {
         SipForegroundService svc = instance;
-        if (svc == null) return;
+        if (svc == null)
+            return;
         svc.registrationState = state != null ? state : "None";
         Log.d(TAG, "Registration state: " + svc.registrationState);
         // Refresh idle notification to show current state
@@ -234,15 +241,17 @@ public class SipForegroundService extends Service {
 
     /** Update call details → refreshes in-call notification */
     public static void updateCallDetails(String callState, String remoteName,
-                                         boolean muted, boolean onHold, boolean speaker) {
+            boolean muted, boolean onHold, boolean speaker) {
         SipForegroundService svc = instance;
-        if (svc == null) return;
+        if (svc == null)
+            return;
         svc.currentCallState = callState != null ? callState : "";
         svc.callRemoteName = remoteName != null ? remoteName : "";
         svc.callMuted = muted;
         svc.callOnHold = onHold;
         svc.callSpeaker = speaker;
-        if (svc.isInCall) svc.refreshNotification();
+        if (svc.isInCall)
+            svc.refreshNotification();
     }
 
     // ------------------------------------------------------------------
@@ -269,13 +278,14 @@ public class SipForegroundService extends Service {
             Log.d(TAG, "Core already alive, skipping auto-login");
             SharedPreferences prefs = getSharedPreferences(CRED_PREFS, MODE_PRIVATE);
             String un = prefs.getString(CRED_USERNAME, null);
-            if (un != null) currentUsername = un;
+            if (un != null)
+                currentUsername = un;
             return;
         }
 
         SharedPreferences prefs = getSharedPreferences(CRED_PREFS, MODE_PRIVATE);
         String username = prefs.getString(CRED_USERNAME, null);
-        String domain   = prefs.getString(CRED_DOMAIN, null);
+        String domain = prefs.getString(CRED_DOMAIN, null);
         String password = prefs.getString(CRED_PASSWORD, null);
         String transport = prefs.getString(CRED_TRANSPORT, "tcp");
 
@@ -297,11 +307,15 @@ public class SipForegroundService extends Service {
     }
 
     private static TransportType parseTransportType(String transport) {
-        if (transport == null) return TransportType.Tcp;
+        if (transport == null)
+            return TransportType.Tcp;
         switch (transport.toLowerCase()) {
-            case "tls": return TransportType.Tls;
-            case "udp": return TransportType.Udp;
-            default:    return TransportType.Tcp;
+            case "tls":
+                return TransportType.Tls;
+            case "udp":
+                return TransportType.Udp;
+            default:
+                return TransportType.Tcp;
         }
     }
 
@@ -367,11 +381,12 @@ public class SipForegroundService extends Service {
 
         switch (action) {
             case ACTION_LOGIN: {
-                String username  = intent.getStringExtra(EXTRA_USERNAME);
-                String domain    = intent.getStringExtra(EXTRA_DOMAIN);
-                String password  = intent.getStringExtra(EXTRA_PASSWORD);
+                String username = intent.getStringExtra(EXTRA_USERNAME);
+                String domain = intent.getStringExtra(EXTRA_DOMAIN);
+                String password = intent.getStringExtra(EXTRA_PASSWORD);
                 String transport = intent.getStringExtra(EXTRA_TRANSPORT);
-                if (username != null) currentUsername = username;
+                if (username != null)
+                    currentUsername = username;
                 storeCredentials(username, domain, password, transport);
                 registrationState = "Registering";
                 LinPhoneHelper loginHelper = LinPhoneHelper.getOrCreateInstance(this);
@@ -393,11 +408,13 @@ public class SipForegroundService extends Service {
                 stopInCallTimer();
                 // Logout SIP
                 LinPhoneHelper lh = LinPhoneHelper.getInstance();
-                if (lh != null) lh.logout();
+                if (lh != null)
+                    lh.logout();
                 removeForegroundNotification();
                 // Also cancel idle notification
                 NotificationManager nmStop = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-                if (nmStop != null) nmStop.cancel(NOTIF_IDLE_ID);
+                if (nmStop != null)
+                    nmStop.cancel(NOTIF_IDLE_ID);
                 clearCredentials();
                 stopSelf();
                 break;
@@ -405,10 +422,14 @@ public class SipForegroundService extends Service {
 
             case ACTION_START_CALL:
                 isInCall = true;
-                callStartTime = System.currentTimeMillis();
+                // Sync callStartTime with SDK duration for accuracy
+                LinPhoneHelper callHelper = LinPhoneHelper.getInstance();
+                int callDur = (callHelper != null) ? callHelper.getCallDuration() : 0;
+                callStartTime = System.currentTimeMillis() - (callDur * 1000L);
                 // Cancel idle notification before switching to call notification
                 NotificationManager nmCall = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-                if (nmCall != null) nmCall.cancel(NOTIF_IDLE_ID);
+                if (nmCall != null)
+                    nmCall.cancel(NOTIF_IDLE_ID);
                 startForegroundSafe(buildCallNotification());
                 timerHandler.postDelayed(timerRunnable, 1000);
                 break;
@@ -429,7 +450,8 @@ public class SipForegroundService extends Service {
                 Log.d(TAG, "Hang up from notification");
                 stopInCallTimer();
                 LinPhoneHelper h = LinPhoneHelper.getInstance();
-                if (h != null) h.hangUp();
+                if (h != null)
+                    h.hangUp();
                 // Switch back to idle notification
                 if (serviceRunning) {
                     showIdleNotification();
@@ -454,7 +476,8 @@ public class SipForegroundService extends Service {
             case ACTION_REJECT: {
                 Log.d(TAG, "Reject from service");
                 LinPhoneHelper rh = LinPhoneHelper.getInstance();
-                if (rh != null) rh.rejectCall();
+                if (rh != null)
+                    rh.rejectCall();
                 // Switch back to idle notification
                 if (serviceRunning) {
                     showIdleNotification();
@@ -468,7 +491,8 @@ public class SipForegroundService extends Service {
             case ACTION_MUTE: {
                 Log.d(TAG, "Mute toggle from notification");
                 LinPhoneHelper mh = LinPhoneHelper.getInstance();
-                if (mh != null) mh.toggleMute();
+                if (mh != null)
+                    mh.toggleMute();
                 // Notification refreshed via updateCallDetails callback
                 break;
             }
@@ -476,7 +500,8 @@ public class SipForegroundService extends Service {
             case ACTION_SPEAKER: {
                 Log.d(TAG, "Speaker toggle from notification");
                 LinPhoneHelper sh = LinPhoneHelper.getInstance();
-                if (sh != null) sh.toggleSpeaker();
+                if (sh != null)
+                    sh.toggleSpeaker();
                 // Notification refreshed via updateCallDetails callback
                 break;
             }
@@ -496,7 +521,9 @@ public class SipForegroundService extends Service {
     }
 
     @Override
-    public IBinder onBind(Intent intent) { return null; }
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
@@ -510,7 +537,8 @@ public class SipForegroundService extends Service {
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationManager nm = getSystemService(NotificationManager.class);
-            if (nm == null) return;
+            if (nm == null)
+                return;
 
             // Call channel — only used during active calls
             NotificationChannel call = new NotificationChannel(
@@ -588,31 +616,34 @@ public class SipForegroundService extends Service {
 
         // Subtitle: call state only (no mute/speaker text)
         StringBuilder subtitle = new StringBuilder();
-        if (!currentCallState.isEmpty()) subtitle.append(currentCallState);
+        if (!currentCallState.isEmpty())
+            subtitle.append(currentCallState);
         if (callOnHold) {
-            if (subtitle.length() > 0) subtitle.append("  ·  ");
+            if (subtitle.length() > 0)
+                subtitle.append("  ·  ");
             subtitle.append("\u23F8 On Hold");
         }
-        if (subtitle.length() == 0) subtitle.append("Ongoing call");
+        if (subtitle.length() == 0)
+            subtitle.append("Ongoing call");
 
         // Distinct icons: mic vs speaker vs hang-up — instantly recognizable
         int muteIcon = callMuted
-                ? R.drawable.ic_notif_mic_off      // Mic with slash = muted
-                : R.drawable.ic_notif_mic_on;       // Mic = unmuted
+                ? R.drawable.ic_notif_mic_off // Mic with slash = muted
+                : R.drawable.ic_notif_mic_on; // Mic = unmuted
         String muteLabel = callMuted ? "\uD83D\uDD07 Unmute" : "\uD83C\uDF99 Mute";
 
         int speakerIcon = callSpeaker
-                ? R.drawable.ic_notif_speaker_on    // Full volume = speaker on
-                : R.drawable.ic_notif_speaker_off;  // Low volume = earpiece
+                ? R.drawable.ic_notif_speaker_on // Full volume = speaker on
+                : R.drawable.ic_notif_speaker_off; // Low volume = earpiece
         String speakerLabel = callSpeaker ? "\uD83D\uDD08 Earpiece" : "\uD83D\uDD0A Speaker";
 
         NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_CALL)
-                .setSmallIcon(R.drawable.ic_notif_call_active)  // Phone-in-talk icon
+                .setSmallIcon(R.drawable.ic_notif_call_active) // Phone-in-talk icon
                 .setContentTitle(title)
                 .setContentText(subtitle.toString())
                 .setSubText("\uD83D\uDCDE Active Call")
-                .setOngoing(true)                               // Sticky — cannot swipe away
-                .setAutoCancel(false)                            // Tap does NOT dismiss
+                .setOngoing(true) // Sticky — cannot swipe away
+                .setAutoCancel(false) // Tap does NOT dismiss
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setShowWhen(false)
                 .setSilent(true)
@@ -622,7 +653,7 @@ public class SipForegroundService extends Service {
                 .setWhen(callStartTime)
                 .setContentIntent(contentPending)
                 .setColorized(true)
-                .setColor(0xFF1a73e8)  // Blue accent
+                .setColor(0xFF1a73e8) // Blue accent
                 // 3 distinct icon action buttons — each visually unique
                 .addAction(new NotificationCompat.Action.Builder(
                         muteIcon, muteLabel, mutePending).build())
@@ -637,7 +668,8 @@ public class SipForegroundService extends Service {
 
         Notification notification = builder.build();
         // Belt-and-suspenders: set raw flags so Android absolutely cannot dismiss it
-        notification.flags |= Notification.FLAG_ONGOING_EVENT | Notification.FLAG_NO_CLEAR | Notification.FLAG_FOREGROUND_SERVICE;
+        notification.flags |= Notification.FLAG_ONGOING_EVENT | Notification.FLAG_NO_CLEAR
+                | Notification.FLAG_FOREGROUND_SERVICE;
         return notification;
     }
 
@@ -653,7 +685,8 @@ public class SipForegroundService extends Service {
         String contentText;
         if ("Ok".equalsIgnoreCase(registrationState)) {
             String name = (currentUsername != null && !currentUsername.isEmpty())
-                    ? currentUsername : "User";
+                    ? currentUsername
+                    : "User";
             contentText = name + " Avail";
         } else if ("Progress".equalsIgnoreCase(registrationState)
                 || "None".equalsIgnoreCase(registrationState)) {
@@ -678,7 +711,8 @@ public class SipForegroundService extends Service {
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC);
 
         Notification notification = builder.build();
-        notification.flags |= Notification.FLAG_ONGOING_EVENT | Notification.FLAG_NO_CLEAR | Notification.FLAG_FOREGROUND_SERVICE;
+        notification.flags |= Notification.FLAG_ONGOING_EVENT | Notification.FLAG_NO_CLEAR
+                | Notification.FLAG_FOREGROUND_SERVICE;
 
         startForegroundIdleSafe(notification);
     }

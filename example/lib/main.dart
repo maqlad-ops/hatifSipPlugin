@@ -28,6 +28,7 @@ class _MyAppState extends State<MyApp> {
   late final Stream<LoginState> _loginStream;
   Stream<Map<String, dynamic>>? _callDataStream;
   StreamSubscription<Map<String, dynamic>>? _callDataSub;
+  Timer? _callTimer;
 
   // Call data state
   Map<String, dynamic> _callData = {};
@@ -70,11 +71,36 @@ class _MyAppState extends State<MyApp> {
     _callDataStream = _linphoneSdkPlugin.addCallDataListener();
     _callDataSub = _callDataStream?.listen((data) {
       if (mounted) {
+        final hasActiveCall = data['hasActiveCall'] == true;
         setState(() => _callData = data);
+        // Start/stop a 1-second periodic refresh for the ticking timer
+        if (hasActiveCall && _callTimer == null) {
+          _startCallTimer();
+        } else if (!hasActiveCall && _callTimer != null) {
+          _stopCallTimer();
+        }
       }
     }, onError: (e) {
       print("Call data stream error: $e");
     });
+  }
+
+  void _startCallTimer() {
+    _callTimer?.cancel();
+    _callTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
+      try {
+        final data = await _linphoneSdkPlugin.getCallData();
+        if (mounted && data.isNotEmpty) {
+          setState(() => _callData = data);
+          if (data['hasActiveCall'] != true) _stopCallTimer();
+        }
+      } catch (_) {}
+    });
+  }
+
+  void _stopCallTimer() {
+    _callTimer?.cancel();
+    _callTimer = null;
   }
 
   // ---------------------------------------------------------------
@@ -136,6 +162,27 @@ class _MyAppState extends State<MyApp> {
     } catch (e) {
       print("Error on speaker: $e");
     }
+  }
+
+  Future<void> toggleHold() async {
+    try {
+      await _linphoneSdkPlugin.toggleHold();
+    } catch (e) {
+      print("Error on hold: $e");
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Transfer
+  // ---------------------------------------------------------------
+
+  void _showTransferDialog() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => _TransferSheet(plugin: _linphoneSdkPlugin),
+    );
   }
 
   // ---------------------------------------------------------------
@@ -439,7 +486,11 @@ class _MyAppState extends State<MyApp> {
     final speaker = _callData['speaker'] == true;
     final onHold = _callData['onHold'] == true;
 
-    final durationStr = _formatDuration(duration);
+    // Only show ticking timer once call is actually connected/streaming
+    final bool isConnected = _isCallConnected(callState);
+    final durationStr = isConnected
+        ? _formatDuration(duration)
+        : _preConnectionLabel(callState);
 
     return Container(
       padding: const EdgeInsets.all(20),
@@ -508,7 +559,7 @@ class _MyAppState extends State<MyApp> {
             ],
           ),
           const SizedBox(height: 16),
-          // Action buttons
+          // Action buttons – row 1: Mute, Speaker, Hold
           Row(
             children: [
               Expanded(
@@ -546,11 +597,16 @@ class _MyAppState extends State<MyApp> {
               const SizedBox(width: 8),
               Expanded(
                 child: ElevatedButton.icon(
-                  onPressed: hangUp,
-                  icon: const Icon(Icons.call_end, size: 18),
-                  label: const Text('End'),
+                  onPressed: toggleHold,
+                  icon: Icon(
+                    onHold ? Icons.play_arrow : Icons.pause,
+                    size: 18,
+                  ),
+                  label: Text(onHold ? 'Resume' : 'Hold'),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFFe53935),
+                    backgroundColor: onHold
+                        ? const Color(0xFFff9800).withOpacity(0.4)
+                        : Colors.white.withOpacity(0.15),
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 12),
                     shape: RoundedRectangleBorder(
@@ -560,6 +616,42 @@ class _MyAppState extends State<MyApp> {
                 ),
               ),
             ],
+          ),
+          const SizedBox(height: 8),
+          // Action buttons – row 2: Transfer (full width)
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: _showTransferDialog,
+              icon: const Icon(Icons.phone_forwarded_rounded, size: 18),
+              label: const Text('Transfer'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF4facfe).withOpacity(0.25),
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          // Action buttons – row 3: End Call (full width)
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: hangUp,
+              icon: const Icon(Icons.call_end, size: 18),
+              label: const Text('End Call'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFe53935),
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
           ),
         ],
       ),
@@ -594,6 +686,40 @@ class _MyAppState extends State<MyApp> {
       return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}';
     }
     return '${m.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}';
+  }
+
+  /// Returns true when the call has moved past the ringing/dialing phase.
+  bool _isCallConnected(String state) {
+    const connectedStates = {
+      'StreamsRunning',
+      'Connected',
+      'Paused',
+      'PausedByRemote',
+      'Resuming',
+      'Updating',
+      'UpdatedByRemote',
+    };
+    return connectedStates.contains(state);
+  }
+
+  /// Human-readable label for pre-connection call states.
+  String _preConnectionLabel(String state) {
+    switch (state) {
+      case 'OutgoingInit':
+        return 'Initiating…';
+      case 'OutgoingProgress':
+        return 'Calling…';
+      case 'OutgoingRinging':
+        return 'Ringing…';
+      case 'OutgoingEarlyMedia':
+        return 'Connecting…';
+      case 'IncomingReceived':
+        return 'Incoming…';
+      case 'IncomingEarlyMedia':
+        return 'Connecting…';
+      default:
+        return '00:00';
+    }
   }
 
   // ---------------------------------------------------------------
@@ -691,6 +817,7 @@ class _MyAppState extends State<MyApp> {
 
   @override
   void dispose() {
+    _stopCallTimer();
     _callDataSub?.cancel();
     _linphoneSdkPlugin.removeLoginListener();
     _userController.dispose();
@@ -698,5 +825,496 @@ class _MyAppState extends State<MyApp> {
     _domainController.dispose();
     _textEditingController.dispose();
     super.dispose();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Transfer Bottom Sheet — Creative Tabbed Dialog
+// ═══════════════════════════════════════════════════════════════════════
+
+class _TransferSheet extends StatefulWidget {
+  final LinphoneFlutterPlugin plugin;
+  const _TransferSheet({required this.plugin});
+
+  @override
+  State<_TransferSheet> createState() => _TransferSheetState();
+}
+
+class _TransferSheetState extends State<_TransferSheet>
+    with SingleTickerProviderStateMixin {
+  late TabController _tabCtrl;
+  final _blindController = TextEditingController();
+  final _attendedController = TextEditingController();
+  bool _consultationInProgress = false;
+  bool _consultCallConnected = false;
+  String _consultStatus = '';
+  Timer? _consultPollTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabCtrl = TabController(length: 2, vsync: this);
+  }
+
+  void _startConsultPoll() {
+    _consultPollTimer?.cancel();
+    _consultPollTimer = Timer.periodic(
+      const Duration(milliseconds: 800),
+      (_) async {
+        if (!mounted || !_consultationInProgress) {
+          _consultPollTimer?.cancel();
+          return;
+        }
+        final connected = await widget.plugin.isConsultCallConnected();
+        if (mounted && connected && !_consultCallConnected) {
+          setState(() {
+            _consultCallConnected = true;
+            _consultStatus = 'Connected \u2714';
+          });
+        }
+      },
+    );
+  }
+
+  void _stopConsultPoll() {
+    _consultPollTimer?.cancel();
+    _consultPollTimer = null;
+  }
+
+  @override
+  void dispose() {
+    _stopConsultPoll();
+    _tabCtrl.dispose();
+    _blindController.dispose();
+    _attendedController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(top: 60),
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0xFF1a1a2e), Color(0xFF16213e), Color(0xFF0f3460)],
+        ),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Drag handle
+          const SizedBox(height: 12),
+          Container(
+            width: 40,
+            height: 4,
+            decoration: BoxDecoration(
+              color: Colors.white24,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(height: 20),
+
+          // Header
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF4facfe).withOpacity(0.15),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.phone_forwarded_rounded,
+                    color: Color(0xFF4facfe), size: 22),
+              ),
+              const SizedBox(width: 12),
+              const Text(
+                'Transfer Call',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 22,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Choose transfer type',
+            style:
+                TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 14),
+          ),
+          const SizedBox(height: 20),
+
+          // Tab bar
+          Container(
+            margin: const EdgeInsets.symmetric(horizontal: 28),
+            padding: const EdgeInsets.all(4),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.08),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: TabBar(
+              controller: _tabCtrl,
+              indicator: BoxDecoration(
+                color: const Color(0xFF4facfe),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              indicatorSize: TabBarIndicatorSize.tab,
+              labelColor: const Color(0xFF0d0d1a),
+              unselectedLabelColor: Colors.white54,
+              labelStyle:
+                  const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+              unselectedLabelStyle:
+                  const TextStyle(fontWeight: FontWeight.w500, fontSize: 15),
+              dividerColor: Colors.transparent,
+              tabs: const [
+                Tab(text: 'Blind'),
+                Tab(text: 'Attended'),
+              ],
+            ),
+          ),
+          const SizedBox(height: 24),
+
+          // Tab content
+          Flexible(
+            child: TabBarView(
+              controller: _tabCtrl,
+              children: [
+                _buildBlindTab(),
+                _buildAttendedTab(),
+              ],
+            ),
+          ),
+
+          // Cancel button
+          Padding(
+            padding: const EdgeInsets.fromLTRB(28, 8, 28, 24),
+            child: SizedBox(
+              width: double.infinity,
+              child: OutlinedButton(
+                onPressed: () => Navigator.pop(context),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFF4facfe),
+                  side: const BorderSide(color: Color(0xFF4facfe)),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                ),
+                child: const Text('Cancel', style: TextStyle(fontSize: 16)),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Blind Transfer Tab ─────────────────────────────────────────────
+
+  Widget _buildBlindTab() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.symmetric(horizontal: 28),
+      child: Column(
+        children: [
+          // Info card
+          _buildInfoCard(
+            title: 'Blind Transfer',
+            description:
+                'Transfer the call immediately without speaking to the '
+                'recipient first. The caller will be connected directly '
+                'to the destination.',
+            accentColor: const Color(0xFF4facfe),
+            icon: Icons.flash_on_rounded,
+          ),
+          const SizedBox(height: 20),
+
+          // Input
+          _buildPhoneField(
+            controller: _blindController,
+            hint: 'Enter destination number',
+          ),
+          const SizedBox(height: 20),
+
+          // Transfer button
+          _buildGradientActionButton(
+            label: 'Transfer Now',
+            icon: Icons.phone_forwarded_rounded,
+            colors: const [Color(0xFF4facfe), Color(0xFF00c6ff)],
+            onPressed: () async {
+              final dest = _blindController.text.trim();
+              if (dest.isEmpty) return;
+              final ok = await widget.plugin.blindTransfer(destination: dest);
+              if (ok && mounted) Navigator.pop(context);
+            },
+          ),
+          const SizedBox(height: 16),
+        ],
+      ),
+    );
+  }
+
+  // ── Attended Transfer Tab ──────────────────────────────────────────
+
+  Widget _buildAttendedTab() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.symmetric(horizontal: 28),
+      child: Column(
+        children: [
+          // Info card
+          _buildInfoCard(
+            title: 'Attended Transfer',
+            description:
+                'First speak with the recipient, then transfer the call. '
+                'The original caller is placed on hold while you consult.',
+            accentColor: const Color(0xFFFF9800),
+            icon: Icons.people_alt_rounded,
+          ),
+          const SizedBox(height: 20),
+
+          // Input
+          _buildPhoneField(
+            controller: _attendedController,
+            hint: 'Enter consult number',
+            enabled: !_consultationInProgress,
+          ),
+          const SizedBox(height: 16),
+
+          // Consultation status
+          if (_consultationInProgress) ...[
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFF9800).withOpacity(0.12),
+                borderRadius: BorderRadius.circular(12),
+                border:
+                    Border.all(color: const Color(0xFFFF9800).withOpacity(0.3)),
+              ),
+              child: Row(
+                children: [
+                  const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor:
+                          AlwaysStoppedAnimation<Color>(Color(0xFFFF9800)),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      _consultStatus,
+                      style: const TextStyle(
+                          color: Color(0xFFFF9800), fontSize: 14),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+          ],
+
+          // Action buttons
+          if (!_consultationInProgress)
+            _buildGradientActionButton(
+              label: 'Start Consultation',
+              icon: Icons.call_rounded,
+              colors: const [Color(0xFFFF9800), Color(0xFFffc107)],
+              onPressed: () async {
+                final dest = _attendedController.text.trim();
+                if (dest.isEmpty) return;
+                final ok =
+                    await widget.plugin.attendedTransfer(destination: dest);
+                if (ok && mounted) {
+                  setState(() {
+                    _consultationInProgress = true;
+                    _consultCallConnected = false;
+                    _consultStatus = 'Consulting $dest…';
+                  });
+                  _startConsultPoll();
+                }
+              },
+            ),
+          if (_consultationInProgress) ...[
+            _buildGradientActionButton(
+              label: _consultCallConnected
+                  ? 'Complete Transfer'
+                  : 'Waiting for answer…',
+              icon: _consultCallConnected
+                  ? Icons.check_circle_outline_rounded
+                  : Icons.hourglass_top_rounded,
+              colors: _consultCallConnected
+                  ? const [Color(0xFF4caf50), Color(0xFF2e7d32)]
+                  : const [Color(0xFF555555), Color(0xFF444444)],
+              onPressed: _consultCallConnected
+                  ? () async {
+                      final ok = await widget.plugin.completeAttendedTransfer();
+                      if (ok && mounted) {
+                        _stopConsultPoll();
+                        Navigator.pop(context);
+                      }
+                    }
+                  : null,
+            ),
+            const SizedBox(height: 10),
+            _buildGradientActionButton(
+              label: 'Cancel & Resume',
+              icon: Icons.cancel_outlined,
+              colors: const [Color(0xFFe53935), Color(0xFFb71c1c)],
+              onPressed: () async {
+                await widget.plugin.cancelAttendedTransfer();
+                _stopConsultPoll();
+                if (mounted) Navigator.pop(context);
+              },
+            ),
+          ],
+          const SizedBox(height: 16),
+        ],
+      ),
+    );
+  }
+
+  // ── Shared widgets ─────────────────────────────────────────────────
+
+  Widget _buildInfoCard({
+    required String title,
+    required String description,
+    required Color accentColor,
+    required IconData icon,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.05),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: accentColor.withOpacity(0.2)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 3,
+                height: 18,
+                decoration: BoxDecoration(
+                  color: accentColor,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Icon(icon, color: accentColor, size: 18),
+              const SizedBox(width: 6),
+              Text(
+                title,
+                style: TextStyle(
+                  color: accentColor,
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            description,
+            style: TextStyle(
+              color: Colors.white.withOpacity(0.6),
+              fontSize: 13,
+              height: 1.4,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPhoneField({
+    required TextEditingController controller,
+    required String hint,
+    bool enabled = true,
+  }) {
+    return TextField(
+      controller: controller,
+      enabled: enabled,
+      keyboardType: TextInputType.phone,
+      textAlign: TextAlign.center,
+      style: const TextStyle(
+        color: Colors.white,
+        fontSize: 18,
+        fontFamily: 'monospace',
+      ),
+      decoration: InputDecoration(
+        hintText: hint,
+        hintStyle: TextStyle(color: Colors.white.withOpacity(0.25)),
+        filled: true,
+        fillColor: Colors.white.withOpacity(0.07),
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: BorderSide(color: Colors.white.withOpacity(0.1)),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: BorderSide(color: Colors.white.withOpacity(0.1)),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: const BorderSide(color: Color(0xFF4facfe)),
+        ),
+        disabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: BorderSide(color: Colors.white.withOpacity(0.05)),
+        ),
+        prefixIcon:
+            const Icon(Icons.dialpad_rounded, color: Colors.white38, size: 20),
+      ),
+    );
+  }
+
+  Widget _buildGradientActionButton({
+    required String label,
+    required IconData icon,
+    required List<Color> colors,
+    VoidCallback? onPressed,
+  }) {
+    final disabled = onPressed == null;
+    return Opacity(
+      opacity: disabled ? 0.45 : 1.0,
+      child: Container(
+        width: double.infinity,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          gradient: LinearGradient(colors: colors),
+          boxShadow: [
+            BoxShadow(
+              color: colors.first.withOpacity(0.35),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: ElevatedButton.icon(
+          onPressed: onPressed,
+          icon: Icon(icon, size: 20),
+          label: Text(label,
+              style:
+                  const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.transparent,
+            shadowColor: Colors.transparent,
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          ),
+        ),
+      ),
+    );
   }
 }

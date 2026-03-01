@@ -1380,19 +1380,210 @@ public class LinPhoneHelper {
     }
 
     public boolean callForward(String destination) {
-        if (core == null)
-            return false;
-        if (core.getCallsNb() == 0)
-            return false;
-        Call currentCall = null;
-        if (core.getCurrentCall() == null)
-            return false;
-        currentCall = core.getCurrentCall();
+        return blindTransfer(destination);
+    }
+
+    // ================================================================
+    //  CALL TRANSFER (Blind & Attended)
+    // ================================================================
+
+    /**
+     * Blind (unattended) transfer — SIP REFER.
+     * Immediately transfers the active call to [destination] without
+     * consulting the transfer target first.
+     *
+     * @param destination SIP URI or phone number to transfer to
+     * @return true if the REFER was sent successfully
+     */
+    public boolean blindTransfer(String destination) {
+        if (core == null || core.getCallsNb() == 0) return false;
+        Call currentCall = core.getCurrentCall();
+        if (currentCall == null && core.getCalls().length > 0)
+            currentCall = core.getCalls()[0];
+        if (currentCall == null) return false;
+
         Address address = core.interpretUrl(destination);
-        if (address == null)
+        if (address == null) {
+            Log.e(TAG, "blindTransfer: cannot interpret destination=" + destination);
             return false;
+        }
+        Log.d(TAG, "blindTransfer -> " + destination);
         currentCall.transferTo(address);
         return true;
+    }
+
+    /**
+     * Attended (consultative) transfer.
+     *
+     * Steps:
+     *  1. The current call (A-B) is automatically paused.
+     *  2. A new outgoing call is placed to [destination] (A-C).
+     *  3. Once the consultant call (A-C) is connected the Flutter / native
+     *     UI should call {@link #completeAttendedTransfer()} which executes
+     *     {@code callB.transferToAnother(callC)} — the SIP stack then bridges
+     *     B and C and drops A.
+     *
+     * This method performs steps 1-2. Step 3 is triggered separately so the
+     * agent can speak with C before completing the transfer.
+     *
+     * @param destination SIP URI or phone number of the consult target
+     * @return true if the consultation call was initiated
+     */
+    public boolean attendedTransfer(String destination) {
+        if (core == null || core.getCallsNb() == 0) return false;
+        Call currentCall = core.getCurrentCall();
+        if (currentCall == null && core.getCalls().length > 0)
+            currentCall = core.getCalls()[0];
+        if (currentCall == null) return false;
+
+        Address address = core.interpretUrl(destination);
+        if (address == null) {
+            Log.e(TAG, "attendedTransfer: cannot interpret destination=" + destination);
+            return false;
+        }
+
+        // Pause the original call first
+        if (currentCall.getState() == Call.State.StreamsRunning
+                || currentCall.getState() == Call.State.Connected) {
+            currentCall.pause();
+            Log.d(TAG, "attendedTransfer: paused original call");
+        }
+
+        // Dial the consultation call
+        CallParams params = core.createCallParams(null);
+        if (params != null) {
+            params.setMediaEncryption(MediaEncryption.None);
+        }
+        Log.d(TAG, "attendedTransfer: calling consult target -> " + destination);
+        core.inviteAddressWithParams(address, params != null ? params : core.createCallParams(null));
+        return true;
+    }
+
+    /**
+     * Complete the attended transfer: bridge the two calls.
+     *
+     * Expects exactly 2 calls:
+     *   - The original (on hold / paused)
+     *   - The consultation call (connected / streaming)
+     *
+     * Executes {@code pausedCall.transferToAnother(activeCall)}.
+     *
+     * @return true if the transfer was executed, false if preconditions not met
+     */
+    public boolean completeAttendedTransfer() {
+        if (core == null || core.getCalls().length < 2) {
+            Log.w(TAG, "completeAttendedTransfer: need exactly 2 calls, have " +
+                    (core != null ? core.getCalls().length : 0));
+            return false;
+        }
+
+        Call pausedCall = null;
+        Call activeCall = null;
+        for (Call c : core.getCalls()) {
+            Call.State st = c.getState();
+            if (st == Call.State.Paused || st == Call.State.PausedByRemote) {
+                pausedCall = c;
+            } else if (st == Call.State.StreamsRunning || st == Call.State.Connected) {
+                activeCall = c;
+            }
+        }
+
+        if (pausedCall == null || activeCall == null) {
+            Log.w(TAG, "completeAttendedTransfer: could not identify paused + active calls");
+            return false;
+        }
+
+        Log.d(TAG, "completeAttendedTransfer: transferring paused -> active");
+        pausedCall.transferToAnother(activeCall);
+        return true;
+    }
+
+    /**
+     * Cancel the attended transfer: hang up the consultation call, resume original.
+     * @return true if cancelled successfully
+     */
+    public boolean cancelAttendedTransfer() {
+        if (core == null) return false;
+
+        Call pausedCall = null;
+        Call activeCall = null;
+        for (Call c : core.getCalls()) {
+            Call.State st = c.getState();
+            if (st == Call.State.Paused || st == Call.State.PausedByRemote) {
+                pausedCall = c;
+            } else if (st == Call.State.StreamsRunning || st == Call.State.Connected
+                    || st == Call.State.OutgoingInit || st == Call.State.OutgoingProgress
+                    || st == Call.State.OutgoingRinging || st == Call.State.OutgoingEarlyMedia) {
+                activeCall = c;
+            }
+        }
+
+        if (activeCall != null) {
+            activeCall.terminate();
+            Log.d(TAG, "cancelAttendedTransfer: terminated consultation call");
+        }
+
+        // Resume original after a brief delay so core finishes the termination
+        if (pausedCall != null) {
+            final Call toResume = pausedCall;
+            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                if (toResume.getState() == Call.State.Paused
+                        || toResume.getState() == Call.State.PausedByRemote) {
+                    toResume.resume();
+                    Log.d(TAG, "cancelAttendedTransfer: resumed original call");
+                }
+            }, 300);
+        }
+        return true;
+    }
+
+    /**
+     * Get the number of active calls (used by transfer UI to show state).
+     */
+    public int getCallCount() {
+        return core != null ? core.getCallsNb() : 0;
+    }
+
+    /**
+     * Check if the consultation call (2nd leg) is connected / streaming.
+     * Returns true only when we have 2 calls: one paused + one in
+     * StreamsRunning or Connected state.
+     */
+    public boolean isConsultCallConnected() {
+        if (core == null || core.getCalls().length < 2) return false;
+        boolean hasPaused = false;
+        boolean hasActive = false;
+        for (Call c : core.getCalls()) {
+            Call.State st = c.getState();
+            if (st == Call.State.Paused || st == Call.State.PausedByRemote) {
+                hasPaused = true;
+            } else if (st == Call.State.StreamsRunning || st == Call.State.Connected) {
+                hasActive = true;
+            }
+        }
+        return hasPaused && hasActive;
+    }
+
+    /**
+     * Get a human-readable label for the consultation call state.
+     */
+    public String getConsultCallStateLabel() {
+        if (core == null || core.getCalls().length < 2) return "";
+        for (Call c : core.getCalls()) {
+            Call.State st = c.getState();
+            if (st != Call.State.Paused && st != Call.State.PausedByRemote) {
+                switch (st) {
+                    case OutgoingInit: return "Initiating…";
+                    case OutgoingProgress: return "Calling…";
+                    case OutgoingRinging: return "Ringing…";
+                    case OutgoingEarlyMedia: return "Connecting…";
+                    case Connected: return "Connected";
+                    case StreamsRunning: return "Connected";
+                    default: return st.name();
+                }
+            }
+        }
+        return "";
     }
 
     public String callLogs() {
@@ -1460,6 +1651,149 @@ public class LinPhoneHelper {
         return core.getCurrentCall().getMicrophoneMuted();
     }
 
+    // =========================================================================
+    // HOLD / RESUME — Production-grade SIP call hold (RFC 3264)
+    // =========================================================================
+
+    /**
+     * Put the current call on hold.
+     *
+     * Sends a re-INVITE with "a=sendonly" / "a=inactive" per RFC 3264.
+     * The remote party will see the call as held and typically play
+     * music-on-hold or silence.
+     *
+     * @return true if the pause request was accepted by the SDK,
+     *         false if there is no call or it is already paused.
+     */
+    public boolean holdCall() {
+        if (core == null) {
+            Log.e(TAG, "holdCall: core is null");
+            return false;
+        }
+
+        Call call = core.getCurrentCall();
+        if (call == null) {
+            // When a call is already paused, getCurrentCall() returns null.
+            // Try the first call in the list.
+            Call[] calls = core.getCalls();
+            if (calls != null && calls.length > 0) {
+                call = calls[0];
+            }
+        }
+        if (call == null) {
+            Log.e(TAG, "holdCall: No call found");
+            return false;
+        }
+
+        Call.State st = call.getState();
+        if (st == Call.State.Paused || st == Call.State.Pausing) {
+            Log.w(TAG, "holdCall: Call already on hold (" + st.name() + ")");
+            return false;
+        }
+
+        int ret = call.pause();
+        if (ret == 0) {
+            Log.d(TAG, "holdCall: pause() request sent successfully");
+            pushCallDetailsToService(call, "On Hold");
+            broadcastCallData();
+            return true;
+        } else {
+            Log.e(TAG, "holdCall: pause() failed with code " + ret);
+            return false;
+        }
+    }
+
+    /**
+     * Resume a held call.
+     *
+     * Sends a re-INVITE with "a=sendrecv" to take the call off hold.
+     *
+     * @return true if the resume request was accepted by the SDK,
+     *         false if there is no paused call.
+     */
+    public boolean resumeCall() {
+        if (core == null) {
+            Log.e(TAG, "resumeCall: core is null");
+            return false;
+        }
+
+        Call call = core.getCurrentCall();
+        if (call == null) {
+            // A paused call is not "current" — search through all calls
+            Call[] calls = core.getCalls();
+            if (calls != null) {
+                for (Call c : calls) {
+                    Call.State s = c.getState();
+                    if (s == Call.State.Paused || s == Call.State.PausedByRemote) {
+                        call = c;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (call == null) {
+            Log.e(TAG, "resumeCall: No paused call found");
+            return false;
+        }
+
+        Call.State st = call.getState();
+        if (st == Call.State.StreamsRunning || st == Call.State.Resuming) {
+            Log.w(TAG, "resumeCall: Call already active (" + st.name() + ")");
+            return false;
+        }
+
+        int ret = call.resume();
+        if (ret == 0) {
+            Log.d(TAG, "resumeCall: resume() request sent successfully");
+            pushCallDetailsToService(call, "In Call");
+            broadcastCallData();
+            return true;
+        } else {
+            Log.e(TAG, "resumeCall: resume() failed with code " + ret);
+            return false;
+        }
+    }
+
+    /**
+     * Toggle hold state: if active → hold, if held → resume.
+     *
+     * @return true if the call is now on hold, false if resumed.
+     *         In the edge case where no call exists, returns false.
+     */
+    public boolean toggleHold() {
+        if (isCallOnHold()) {
+            resumeCall();
+            return false; // now resumed → not on hold
+        } else {
+            holdCall();
+            return true; // now on hold
+        }
+    }
+
+    /**
+     * Check whether the current (or first) call is on hold.
+     */
+    public boolean isCallOnHold() {
+        if (core == null)
+            return false;
+
+        Call call = core.getCurrentCall();
+        if (call == null) {
+            Call[] calls = core.getCalls();
+            if (calls != null && calls.length > 0) {
+                call = calls[0];
+            }
+        }
+        if (call == null)
+            return false;
+
+        Call.State st = call.getState();
+        return st == Call.State.Paused
+                || st == Call.State.PausedByRemote
+                || st == Call.State.Pausing;
+    }
+
     /**
      * Send DTMF tone (using RFC2833)
      */
@@ -1494,6 +1828,60 @@ public class LinPhoneHelper {
      */
     public boolean hasActiveCall() {
         return core != null && core.getCallsNb() > 0;
+    }
+
+    /**
+     * Check if the current call is connected (media established).
+     * Returns true for Connected, StreamsRunning, Paused, PausedByRemote, Resuming.
+     * Returns false during ringing / dialing phases.
+     */
+    public boolean isCallConnected() {
+        if (core == null)
+            return false;
+        Call call = core.getCurrentCall();
+        if (call == null && core.getCalls().length > 0)
+            call = core.getCalls()[0];
+        if (call == null)
+            return false;
+        Call.State st = call.getState();
+        return st == Call.State.StreamsRunning || st == Call.State.Connected
+                || st == Call.State.Paused || st == Call.State.PausedByRemote
+                || st == Call.State.Resuming || st == Call.State.Updating
+                || st == Call.State.UpdatedByRemote;
+    }
+
+    /**
+     * Get a human-readable label for the current call state (pre-connection
+     * phases).
+     */
+    public String getCallStateLabel() {
+        if (core == null)
+            return "";
+        Call call = core.getCurrentCall();
+        if (call == null && core.getCalls().length > 0)
+            call = core.getCalls()[0];
+        if (call == null)
+            return "";
+        switch (call.getState()) {
+            case OutgoingInit:
+                return "Initiating…";
+            case OutgoingProgress:
+                return "Calling…";
+            case OutgoingRinging:
+                return "Ringing…";
+            case OutgoingEarlyMedia:
+                return "Connecting…";
+            case IncomingReceived:
+                return "Incoming…";
+            case IncomingEarlyMedia:
+                return "Connecting…";
+            case Connected:
+                return "Connected";
+            case StreamsRunning:
+                return "";
+            default:
+                return "";
+        }
     }
 
     /**
@@ -2154,18 +2542,22 @@ public class LinPhoneHelper {
 
                 case Released:
                     Log.d(TAG, "Call released");
-                    SipForegroundService.stopCallMode(context);
-                    IncomingCallActivity.finishIfRunning();
-                    ActiveCallActivity.finishIfRunning();
+                    if (core.getCallsNb() == 0) {
+                        SipForegroundService.stopCallMode(context);
+                        IncomingCallActivity.finishIfRunning();
+                        ActiveCallActivity.finishIfRunning();
+                    }
                     sendCallEvent(state.name());
                     broadcastCallData();
                     break;
 
                 case End:
                     Log.d(TAG, "Call ended - Reason: " + call.getReason().name());
-                    SipForegroundService.stopCallMode(context);
-                    IncomingCallActivity.finishIfRunning();
-                    ActiveCallActivity.finishIfRunning();
+                    if (core.getCallsNb() == 0) {
+                        SipForegroundService.stopCallMode(context);
+                        IncomingCallActivity.finishIfRunning();
+                        ActiveCallActivity.finishIfRunning();
+                    }
                     sendCallEvent(state.name());
                     broadcastCallData();
                     break;
@@ -2178,9 +2570,11 @@ public class LinPhoneHelper {
 
                 case Error:
                     Log.e(TAG, "Call error: " + message + " - Reason: " + call.getReason().name());
-                    SipForegroundService.stopCallMode(context);
-                    IncomingCallActivity.finishIfRunning();
-                    ActiveCallActivity.finishIfRunning();
+                    if (core.getCallsNb() == 0) {
+                        SipForegroundService.stopCallMode(context);
+                        IncomingCallActivity.finishIfRunning();
+                        ActiveCallActivity.finishIfRunning();
+                    }
                     sendCallEvent(state.name());
                     broadcastCallData();
                     break;
