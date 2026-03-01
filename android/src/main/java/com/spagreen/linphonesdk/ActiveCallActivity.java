@@ -27,6 +27,10 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import org.linphone.core.Call;
+
+import java.util.List;
+
 /**
  * Native Android active-call screen — creative, modern design.
  *
@@ -60,7 +64,7 @@ public class ActiveCallActivity extends Activity {
     private boolean dtmfVisible = false;
 
     // Action-button references
-    private FrameLayout muteCircle, speakerCircle, keypadCircle, holdCircle, transferCircle;
+    private FrameLayout muteCircle, speakerCircle, keypadCircle, holdCircle, transferCircle, conferenceCircle;
     private ImageView muteIcon, speakerIcon, holdIcon;
     private TextView muteLabel, speakerLabel, holdLabel;
     private TextView nameView, statusView;
@@ -69,6 +73,14 @@ public class ActiveCallActivity extends Activity {
 
     // Transfer dialog overlay
     private FrameLayout transferOverlay;
+
+    // Conference dialog overlay
+    private FrameLayout conferenceOverlay;
+    private boolean conferenceVisible = false;
+    private boolean conferenceActive = false;
+    private LinearLayout confParticipantList;
+    private TextView confStatusText;
+    private LinearLayout confActionContainer;
 
     private static ActiveCallActivity currentInstance;
 
@@ -133,7 +145,9 @@ public class ActiveCallActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (transferVisible)
+        if (conferenceVisible)
+            hideConferenceDialog();
+        else if (transferVisible)
             hideTransferDialog();
         else if (dtmfVisible)
             toggleDtmfPad();
@@ -370,6 +384,11 @@ public class ActiveCallActivity extends Activity {
         transferOverlay.setVisibility(View.GONE);
         root.addView(transferOverlay, matchWrap());
 
+        // ── Conference dialog overlay ────────────────────────────────
+        conferenceOverlay = buildConferenceOverlay();
+        conferenceOverlay.setVisibility(View.GONE);
+        root.addView(conferenceOverlay, matchWrap());
+
         return root;
     }
 
@@ -481,7 +500,7 @@ public class ActiveCallActivity extends Activity {
         grid.addView(r1, wrapCenter());
         spacer(grid, 16);
 
-        // Row 2: Hold · Transfer
+        // Row 2: Hold · Transfer · Conference
         LinearLayout r2 = hBox(Gravity.CENTER);
 
         View[] hv = actionBtn(res("ic_pause"), "Hold", this::toggleHold);
@@ -495,6 +514,12 @@ public class ActiveCallActivity extends Activity {
         View[] tv = actionBtn(res("ic_call_transfer"), "Transfer", this::showTransferDialog);
         transferCircle = (FrameLayout) tv[0];
         r2.addView(tv[1], new LinearLayout.LayoutParams(dp(90), ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        hSpacer(r2, 12);
+
+        View[] cv = actionBtn(res("ic_group_call"), "Merge", this::showConferenceDialog);
+        conferenceCircle = (FrameLayout) cv[0];
+        r2.addView(cv[1], new LinearLayout.LayoutParams(dp(90), ViewGroup.LayoutParams.WRAP_CONTENT));
 
         grid.addView(r2, wrapCenter());
         return grid;
@@ -926,6 +951,325 @@ public class ActiveCallActivity extends Activity {
         });
         container.addView(cancelBtn, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    //  Conference dialog overlay
+    // ══════════════════════════════════════════════════════════════════
+
+    private void showConferenceDialog() {
+        conferenceVisible = true;
+        refreshConferenceUI();
+        if (conferenceOverlay != null) {
+            conferenceOverlay.setAlpha(0f);
+            conferenceOverlay.setVisibility(View.VISIBLE);
+            conferenceOverlay.animate().alpha(1f).setDuration(200).start();
+        }
+    }
+
+    private void hideConferenceDialog() {
+        conferenceVisible = false;
+        if (conferenceOverlay != null) {
+            conferenceOverlay.animate().alpha(0f).setDuration(150)
+                    .withEndAction(() -> conferenceOverlay.setVisibility(View.GONE)).start();
+        }
+    }
+
+    private FrameLayout buildConferenceOverlay() {
+        FrameLayout overlay = new FrameLayout(this);
+        overlay.setBackgroundColor(0xF01a1a2e);
+        overlay.setClickable(true);
+
+        LinearLayout container = vBox(Gravity.CENTER);
+        container.setPadding(dp(28), dp(40), dp(28), dp(28));
+
+        // ── Header ──
+        LinearLayout header = hBox(Gravity.CENTER_VERTICAL);
+
+        // Icon
+        ImageView confIcon = new ImageView(this);
+        confIcon.setImageResource(res("ic_group_call"));
+        confIcon.setColorFilter(0xFF4facfe);
+        header.addView(confIcon, new LinearLayout.LayoutParams(dp(32), dp(32)));
+        hSpacer(header, 12);
+
+        // Title
+        TextView title = txt("Conference Call", Color.WHITE, 24, Typeface.DEFAULT_BOLD);
+        header.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        // Close
+        TextView close = txt("✕", 0xFF4facfe, 22, Typeface.DEFAULT_BOLD);
+        close.setPadding(dp(12), dp(4), dp(4), dp(4));
+        close.setOnClickListener(v -> hideConferenceDialog());
+        header.addView(close, wrapCenter());
+
+        container.addView(header, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        spacer(container, 8);
+
+        // Subtitle
+        TextView subtitle = txt("Merge calls into a group conversation", 0x99FFFFFF, 14, null);
+        container.addView(subtitle, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        spacer(container, 20);
+
+        // ── Status text ──
+        confStatusText = txt("", 0xFFffc107, 14, Typeface.DEFAULT_BOLD);
+        confStatusText.setGravity(Gravity.CENTER);
+        confStatusText.setVisibility(View.GONE);
+        container.addView(confStatusText, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        spacer(container, 12);
+
+        // ── Info card ──
+        container.addView(buildInfoCard(
+                "How it works",
+                "Merge your current calls into one conference. " +
+                        "You can also add new participants by dialing them.",
+                0xFF4facfe), new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        spacer(container, 16);
+
+        // ── Participant list ──
+        confParticipantList = vBox(Gravity.START);
+        container.addView(confParticipantList, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        spacer(container, 16);
+
+        // ── Add participant input ──
+        EditText addInput = buildPhoneInput("Add participant (SIP / number)");
+        container.addView(addInput, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(50)));
+        spacer(container, 12);
+
+        // ── Action buttons container ──
+        confActionContainer = vBox(Gravity.CENTER);
+        container.addView(confActionContainer, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // Build the initial buttons
+        buildConferenceActions(addInput);
+
+        // Scroll wrapper
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.addView(container, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        overlay.addView(scroll, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        return overlay;
+    }
+
+    private void buildConferenceActions(EditText addInput) {
+        confActionContainer.removeAllViews();
+
+        LinPhoneHelper h = LinPhoneHelper.getInstance();
+        boolean inConf = h != null && h.isInConference();
+        int callCount = h != null ? h.getCallCount() : 0;
+
+        if (inConf) {
+            // ── Conference is active ──
+
+            // Add participant button
+            LinearLayout addBtn = buildActionButton("Add Participant", 0xFF4facfe, 0xFF00f2fe, () -> {
+                String dest = addInput.getText().toString().trim();
+                if (dest.isEmpty()) return;
+                LinPhoneHelper h2 = LinPhoneHelper.getInstance();
+                if (h2 != null) {
+                    boolean ok = h2.addToConference(dest);
+                    if (ok) {
+                        addInput.setText("");
+                        // After the new call connects, merge it
+                        handler.postDelayed(() -> {
+                            LinPhoneHelper h3 = LinPhoneHelper.getInstance();
+                            if (h3 != null) h3.mergeCallsToConference();
+                            refreshConferenceUI();
+                        }, 3000);
+                    }
+                }
+                refreshConferenceUI();
+            });
+            confActionContainer.addView(addBtn, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
+            spacer(confActionContainer, 10);
+
+            // End conference button
+            LinearLayout endBtn = buildActionButton("End Conference", 0xFFe53935, 0xFFb71c1c, () -> {
+                LinPhoneHelper h2 = LinPhoneHelper.getInstance();
+                if (h2 != null) h2.endConference();
+                conferenceActive = false;
+                hideConferenceDialog();
+            });
+            confActionContainer.addView(endBtn, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
+        } else if (callCount >= 2) {
+            // ── 2+ calls exist, offer merge ──
+
+            LinearLayout mergeBtn = buildActionButton("Merge All Calls", 0xFF4caf50, 0xFF2e7d32, () -> {
+                LinPhoneHelper h2 = LinPhoneHelper.getInstance();
+                if (h2 != null) {
+                    boolean ok = h2.startConference();
+                    if (ok) {
+                        conferenceActive = true;
+                        confStatusText.setText("Conference active — " + h2.getConferenceParticipantCount() + " participants");
+                        confStatusText.setVisibility(View.VISIBLE);
+                    }
+                }
+                refreshConferenceUI();
+            });
+            confActionContainer.addView(mergeBtn, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
+            spacer(confActionContainer, 10);
+
+            // Also allow adding another participant
+            LinearLayout addBtn = buildActionButton("Add Participant", 0xFF4facfe, 0xFF00f2fe, () -> {
+                String dest = addInput.getText().toString().trim();
+                if (dest.isEmpty()) return;
+                LinPhoneHelper h2 = LinPhoneHelper.getInstance();
+                if (h2 != null) {
+                    h2.addToConference(dest);
+                    addInput.setText("");
+                }
+                refreshConferenceUI();
+            });
+            confActionContainer.addView(addBtn, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
+        } else {
+            // ── Single call — need to add someone first ──
+
+            LinearLayout callBtn = buildActionButton("Call & Add to Conference", 0xFFFF9800, 0xFFffc107, () -> {
+                String dest = addInput.getText().toString().trim();
+                if (dest.isEmpty()) return;
+                LinPhoneHelper h2 = LinPhoneHelper.getInstance();
+                if (h2 != null) {
+                    boolean ok = h2.addToConference(dest);
+                    if (ok) {
+                        addInput.setText("");
+                        confStatusText.setText("Calling " + dest + "…");
+                        confStatusText.setVisibility(View.VISIBLE);
+                    }
+                }
+                // Refresh after a delay to pick up the new call
+                handler.postDelayed(this::refreshConferenceUI, 2000);
+            });
+            confActionContainer.addView(callBtn, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
+        }
+    }
+
+    private void refreshConferenceUI() {
+        if (confParticipantList == null) return;
+        confParticipantList.removeAllViews();
+
+        LinPhoneHelper h = LinPhoneHelper.getInstance();
+        if (h == null) return;
+
+        boolean inConf = h.isInConference();
+        int callCount = h.getCallCount();
+
+        if (inConf) {
+            conferenceActive = true;
+            List<String> participants = h.getConferenceParticipants();
+            int total = h.getConferenceParticipantCount();
+
+            confStatusText.setText("Conference active — " + total + " participants");
+            confStatusText.setTextColor(0xFF4caf50);
+            confStatusText.setVisibility(View.VISIBLE);
+
+            // "You" entry
+            confParticipantList.addView(buildParticipantRow("You (local)", true), new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            spacer(confParticipantList, 6);
+
+            for (String p : participants) {
+                confParticipantList.addView(buildParticipantRow(p, false), new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                spacer(confParticipantList, 6);
+            }
+        } else if (callCount >= 2) {
+            confStatusText.setText("Multiple calls detected — ready to merge");
+            confStatusText.setTextColor(0xFFffc107);
+            confStatusText.setVisibility(View.VISIBLE);
+
+            // Show current calls
+            for (Call c : h.getCalls()) {
+                String name = "";
+                if (c.getRemoteAddress() != null) {
+                    name = c.getRemoteAddress().getDisplayName();
+                    if (name == null || name.isEmpty()) name = c.getRemoteAddress().getUsername();
+                }
+                String stateLabel = c.getState().name();
+                confParticipantList.addView(buildParticipantRow(name + " (" + stateLabel + ")", false),
+                        new LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                spacer(confParticipantList, 6);
+            }
+        } else {
+            conferenceActive = false;
+            confStatusText.setText("Add a participant to start a conference");
+            confStatusText.setTextColor(0x99FFFFFF);
+            confStatusText.setVisibility(View.VISIBLE);
+        }
+
+        // Rebuild action buttons
+        // Find the addInput — it's the EditText 2 views before confActionContainer in parent
+        ViewGroup parent = (ViewGroup) confActionContainer.getParent();
+        EditText addInput = null;
+        for (int i = 0; i < parent.getChildCount(); i++) {
+            if (parent.getChildAt(i) instanceof EditText) {
+                addInput = (EditText) parent.getChildAt(i);
+            }
+        }
+        if (addInput != null) buildConferenceActions(addInput);
+    }
+
+    private LinearLayout buildParticipantRow(String name, boolean isLocal) {
+        LinearLayout row = hBox(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(14), dp(10), dp(14), dp(10));
+
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(dp(12));
+        bg.setColor(isLocal ? 0x1A4facfe : 0x0DFFFFFF);
+        bg.setStroke(dp(1), isLocal ? 0x334facfe : 0x1AFFFFFF);
+        row.setBackground(bg);
+
+        // Avatar circle
+        FrameLayout avCircle = new FrameLayout(this);
+        GradientDrawable avBg = new GradientDrawable();
+        avBg.setShape(GradientDrawable.OVAL);
+        avBg.setColor(isLocal ? 0xFF4facfe : 0xFF7c4dff);
+        avCircle.setBackground(avBg);
+
+        String initials = "";
+        if (name != null && !name.isEmpty()) {
+            initials = name.substring(0, 1).toUpperCase();
+        }
+        TextView initView = txt(initials, Color.WHITE, 14, Typeface.DEFAULT_BOLD);
+        initView.setGravity(Gravity.CENTER);
+        avCircle.addView(initView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        row.addView(avCircle, new LinearLayout.LayoutParams(dp(36), dp(36)));
+
+        hSpacer(row, 12);
+
+        // Name
+        TextView nameText = txt(name != null ? name : "Unknown", Color.WHITE, 15,
+                isLocal ? Typeface.DEFAULT_BOLD : null);
+        row.addView(nameText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        // Connected indicator
+        if (isLocal) {
+            TextView badge = txt("HOST", 0xFF4facfe, 10, Typeface.DEFAULT_BOLD);
+            badge.setPadding(dp(8), dp(2), dp(8), dp(2));
+            GradientDrawable badgeBg = new GradientDrawable();
+            badgeBg.setCornerRadius(dp(8));
+            badgeBg.setColor(0x1A4facfe);
+            badge.setBackground(badgeBg);
+            row.addView(badge, wrapCenter());
+        }
+
+        return row;
     }
 
     // ── Shared dialog helpers ────────────────────────────────────────

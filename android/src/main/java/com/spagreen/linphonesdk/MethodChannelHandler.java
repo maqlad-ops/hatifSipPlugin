@@ -154,6 +154,54 @@ public class MethodChannelHandler implements MethodChannel.MethodCallHandler {
                 result.success(linPhoneHelper.isConsultCallConnected());
                 break;
 
+            // ── Conference ───────────────────────────────────────────
+
+            case "start_conference":
+                Log.d(TAG, "start_conference requested");
+                result.success(linPhoneHelper.startConference());
+                break;
+
+            case "add_to_conference": {
+                Map confData = (Map) call.arguments;
+                String confDest = (String) confData.get("destination");
+                Log.d(TAG, "add_to_conference -> " + confDest);
+                result.success(linPhoneHelper.addToConference(confDest));
+                break;
+            }
+
+            case "remove_from_conference": {
+                Map confRemData = (Map) call.arguments;
+                String confAddr = (String) confRemData.get("address");
+                Log.d(TAG, "remove_from_conference -> " + confAddr);
+                result.success(linPhoneHelper.removeFromConference(confAddr));
+                break;
+            }
+
+            case "end_conference":
+                Log.d(TAG, "end_conference requested");
+                result.success(linPhoneHelper.endConference());
+                break;
+
+            case "is_in_conference":
+                Log.d(TAG, "is_in_conference query");
+                result.success(linPhoneHelper.isInConference());
+                break;
+
+            case "get_conference_participant_count":
+                Log.d(TAG, "get_conference_participant_count query");
+                result.success(linPhoneHelper.getConferenceParticipantCount());
+                break;
+
+            case "get_conference_participants":
+                Log.d(TAG, "get_conference_participants query");
+                result.success(linPhoneHelper.getConferenceParticipants());
+                break;
+
+            case "merge_calls_to_conference":
+                Log.d(TAG, "merge_calls_to_conference requested");
+                result.success(linPhoneHelper.mergeCallsToConference());
+                break;
+
             case "toggle_speaker":
                 Log.d(TAG, "toggle_speaker requested");
                 linPhoneHelper.toggleSpeaker();

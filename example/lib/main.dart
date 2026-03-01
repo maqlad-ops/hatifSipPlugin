@@ -186,6 +186,19 @@ class _MyAppState extends State<MyApp> {
   }
 
   // ---------------------------------------------------------------
+  // Conference
+  // ---------------------------------------------------------------
+
+  void _showConferenceDialog() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => _ConferenceSheet(plugin: _linphoneSdkPlugin),
+    );
+  }
+
+  // ---------------------------------------------------------------
   // Build
   // ---------------------------------------------------------------
 
@@ -618,22 +631,41 @@ class _MyAppState extends State<MyApp> {
             ],
           ),
           const SizedBox(height: 8),
-          // Action buttons – row 2: Transfer (full width)
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              onPressed: _showTransferDialog,
-              icon: const Icon(Icons.phone_forwarded_rounded, size: 18),
-              label: const Text('Transfer'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF4facfe).withOpacity(0.25),
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
+          // Action buttons – row 2: Transfer + Conference
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: _showTransferDialog,
+                  icon: const Icon(Icons.phone_forwarded_rounded, size: 18),
+                  label: const Text('Transfer'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF4facfe).withOpacity(0.25),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
                 ),
               ),
-            ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: _showConferenceDialog,
+                  icon: const Icon(Icons.groups_rounded, size: 18),
+                  label: const Text('Conference'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF7c4dff).withOpacity(0.25),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 8),
           // Action buttons – row 3: End Call (full width)
@@ -1279,6 +1311,436 @@ class _TransferSheetState extends State<_TransferSheet>
   }
 
   Widget _buildGradientActionButton({
+    required String label,
+    required IconData icon,
+    required List<Color> colors,
+    VoidCallback? onPressed,
+  }) {
+    final disabled = onPressed == null;
+    return Opacity(
+      opacity: disabled ? 0.45 : 1.0,
+      child: Container(
+        width: double.infinity,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          gradient: LinearGradient(colors: colors),
+          boxShadow: [
+            BoxShadow(
+              color: colors.first.withOpacity(0.35),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: ElevatedButton.icon(
+          onPressed: onPressed,
+          icon: Icon(icon, size: 20),
+          label: Text(label,
+              style:
+                  const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.transparent,
+            shadowColor: Colors.transparent,
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Conference Bottom Sheet — Creative Dialog
+// ═══════════════════════════════════════════════════════════════════════
+
+class _ConferenceSheet extends StatefulWidget {
+  final LinphoneFlutterPlugin plugin;
+  const _ConferenceSheet({required this.plugin});
+
+  @override
+  State<_ConferenceSheet> createState() => _ConferenceSheetState();
+}
+
+class _ConferenceSheetState extends State<_ConferenceSheet> {
+  final _addController = TextEditingController();
+  bool _inConference = false;
+  int _participantCount = 0;
+  List<String> _participants = [];
+  int _callCount = 0;
+  String _status = '';
+  Timer? _pollTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+    _pollTimer = Timer.periodic(const Duration(seconds: 1), (_) => _refresh());
+  }
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    _addController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _refresh() async {
+    if (!mounted) return;
+    final inConf = await widget.plugin.isInConference();
+    final count =
+        inConf ? await widget.plugin.getConferenceParticipantCount() : 0;
+    final parts =
+        inConf ? await widget.plugin.getConferenceParticipants() : <String>[];
+    final calls = await widget.plugin.getCallCount();
+    if (!mounted) return;
+    setState(() {
+      _inConference = inConf;
+      _participantCount = count;
+      _participants = parts;
+      _callCount = calls;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      constraints:
+          BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.85),
+      decoration: const BoxDecoration(
+        color: Color(0xFF1a1a2e),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+        boxShadow: [
+          BoxShadow(color: Colors.black54, blurRadius: 20, spreadRadius: 5),
+        ],
+      ),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(24, 16, 24, 28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Drag handle
+            Center(
+              child: Container(
+                width: 42,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Header
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFF7c4dff), Color(0xFFb388ff)],
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: const Color(0xFF7c4dff).withOpacity(0.4),
+                        blurRadius: 12,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
+                  ),
+                  child: const Icon(Icons.groups_rounded,
+                      color: Colors.white, size: 26),
+                ),
+                const SizedBox(width: 14),
+                const Expanded(
+                  child: Text(
+                    'Conference Call',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 0.3,
+                    ),
+                  ),
+                ),
+                GestureDetector(
+                  onTap: () => Navigator.pop(context),
+                  child: Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: Colors.white10,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.close,
+                        color: Colors.white54, size: 20),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Merge calls into a group conversation',
+              style: TextStyle(
+                color: Colors.white.withOpacity(0.5),
+                fontSize: 14,
+              ),
+            ),
+            const SizedBox(height: 20),
+
+            // Status chip
+            if (_status.isNotEmpty || _inConference || _callCount >= 2)
+              Container(
+                width: double.infinity,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(12),
+                  color: _inConference
+                      ? const Color(0xFF4caf50).withOpacity(0.15)
+                      : _callCount >= 2
+                          ? const Color(0xFFffc107).withOpacity(0.15)
+                          : Colors.white.withOpacity(0.05),
+                  border: Border.all(
+                    color: _inConference
+                        ? const Color(0xFF4caf50).withOpacity(0.3)
+                        : _callCount >= 2
+                            ? const Color(0xFFffc107).withOpacity(0.3)
+                            : Colors.white12,
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      _inConference ? Icons.check_circle : Icons.info_outline,
+                      color: _inConference
+                          ? const Color(0xFF4caf50)
+                          : const Color(0xFFffc107),
+                      size: 18,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        _inConference
+                            ? 'Conference active — $_participantCount participants'
+                            : _callCount >= 2
+                                ? 'Multiple calls detected — ready to merge'
+                                : _status.isNotEmpty
+                                    ? _status
+                                    : 'Add a participant to start',
+                        style: TextStyle(
+                          color: _inConference
+                              ? const Color(0xFF4caf50)
+                              : _callCount >= 2
+                                  ? const Color(0xFFffc107)
+                                  : Colors.white54,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            const SizedBox(height: 16),
+
+            // Participant list
+            if (_inConference) ...[
+              _buildParticipantTile('You (local)', isLocal: true),
+              ..._participants.map((p) => _buildParticipantTile(p)).toList(),
+              const SizedBox(height: 16),
+            ],
+
+            // If 2+ calls but no conference yet, show the calls
+            if (!_inConference && _callCount >= 2) ...[
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(12),
+                  color: Colors.white.withOpacity(0.05),
+                ),
+                child: Text(
+                  '$_callCount calls ready to merge',
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 14,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
+
+            // Add participant input
+            Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(14),
+                color: Colors.white.withOpacity(0.07),
+                border: Border.all(color: Colors.white.withOpacity(0.1)),
+              ),
+              child: TextField(
+                controller: _addController,
+                style: const TextStyle(color: Colors.white, fontSize: 15),
+                decoration: InputDecoration(
+                  hintText: 'Add participant (SIP / number)',
+                  hintStyle: TextStyle(color: Colors.white.withOpacity(0.3)),
+                  prefixIcon: const Icon(Icons.person_add_rounded,
+                      color: Colors.white38, size: 22),
+                  border: InputBorder.none,
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Action buttons
+            if (_inConference) ...[
+              _buildConfButton(
+                label: 'Add Participant',
+                icon: Icons.person_add_rounded,
+                colors: const [Color(0xFF4facfe), Color(0xFF00f2fe)],
+                onPressed: () async {
+                  final dest = _addController.text.trim();
+                  if (dest.isEmpty) return;
+                  final ok =
+                      await widget.plugin.addToConference(destination: dest);
+                  if (ok) {
+                    _addController.clear();
+                    setState(() => _status = 'Calling $dest…');
+                    // Auto-merge after a delay
+                    await Future.delayed(const Duration(seconds: 3));
+                    await widget.plugin.mergeCallsToConference();
+                    _refresh();
+                  }
+                },
+              ),
+              const SizedBox(height: 10),
+              _buildConfButton(
+                label: 'End Conference',
+                icon: Icons.call_end_rounded,
+                colors: const [Color(0xFFe53935), Color(0xFFb71c1c)],
+                onPressed: () async {
+                  await widget.plugin.endConference();
+                  if (mounted) Navigator.pop(context);
+                },
+              ),
+            ] else if (_callCount >= 2) ...[
+              _buildConfButton(
+                label: 'Merge All Calls',
+                icon: Icons.merge_rounded,
+                colors: const [Color(0xFF4caf50), Color(0xFF2e7d32)],
+                onPressed: () async {
+                  final ok = await widget.plugin.startConference();
+                  if (ok) {
+                    setState(() => _status = 'Conference started!');
+                    _refresh();
+                  }
+                },
+              ),
+              const SizedBox(height: 10),
+              _buildConfButton(
+                label: 'Add Participant',
+                icon: Icons.person_add_rounded,
+                colors: const [Color(0xFF4facfe), Color(0xFF00f2fe)],
+                onPressed: () async {
+                  final dest = _addController.text.trim();
+                  if (dest.isEmpty) return;
+                  await widget.plugin.addToConference(destination: dest);
+                  _addController.clear();
+                  _refresh();
+                },
+              ),
+            ] else ...[
+              _buildConfButton(
+                label: 'Call & Add to Conference',
+                icon: Icons.add_call,
+                colors: const [Color(0xFFFF9800), Color(0xFFffc107)],
+                onPressed: () async {
+                  final dest = _addController.text.trim();
+                  if (dest.isEmpty) return;
+                  final ok =
+                      await widget.plugin.addToConference(destination: dest);
+                  if (ok) {
+                    _addController.clear();
+                    setState(() => _status = 'Calling $dest…');
+                  }
+                },
+              ),
+            ],
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildParticipantTile(String name, {bool isLocal = false}) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          color: isLocal
+              ? const Color(0xFF4facfe).withOpacity(0.1)
+              : Colors.white.withOpacity(0.05),
+          border: Border.all(
+            color: isLocal
+                ? const Color(0xFF4facfe).withOpacity(0.2)
+                : Colors.white10,
+          ),
+        ),
+        child: Row(
+          children: [
+            CircleAvatar(
+              radius: 18,
+              backgroundColor:
+                  isLocal ? const Color(0xFF4facfe) : const Color(0xFF7c4dff),
+              child: Text(
+                name.isNotEmpty ? name[0].toUpperCase() : '?',
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                name,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 15,
+                  fontWeight: isLocal ? FontWeight.bold : FontWeight.normal,
+                ),
+              ),
+            ),
+            if (isLocal)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF4facfe).withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Text(
+                  'HOST',
+                  style: TextStyle(
+                    color: Color(0xFF4facfe),
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildConfButton({
     required String label,
     required IconData icon,
     required List<Color> colors,

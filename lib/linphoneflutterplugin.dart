@@ -328,6 +328,70 @@ class LinphoneFlutterPlugin {
     return res;
   }
 
+  // ═══════════════════════════════════════════════════════════════════
+  //  Conference (3-way / N-way merge)
+  // ═══════════════════════════════════════════════════════════════════
+
+  /// Start a conference by merging all current calls together.
+  /// Requires at least 2 calls to be active.
+  Future<bool> startConference() async {
+    final res = await _channel.invokeMethod("start_conference");
+    _log("startConference", data: res);
+    return res;
+  }
+
+  /// Add a new participant to the conference by dialing them.
+  /// [destination] - SIP URI or phone number
+  Future<bool> addToConference({required String destination}) async {
+    final res = await _channel
+        .invokeMethod("add_to_conference", {"destination": destination});
+    _log("addToConference", data: res);
+    return res;
+  }
+
+  /// Remove a participant from the conference by address.
+  Future<bool> removeFromConference({required String address}) async {
+    final res = await _channel
+        .invokeMethod("remove_from_conference", {"address": address});
+    _log("removeFromConference", data: res);
+    return res;
+  }
+
+  /// End the entire conference, disconnecting all participants.
+  Future<bool> endConference() async {
+    final res = await _channel.invokeMethod("end_conference");
+    _log("endConference", data: res);
+    return res;
+  }
+
+  /// Check if a conference is currently active.
+  Future<bool> isInConference() async {
+    final res = await _channel.invokeMethod("is_in_conference");
+    _log("isInConference", data: res);
+    return res;
+  }
+
+  /// Get the number of participants in the conference (including local user).
+  Future<int> getConferenceParticipantCount() async {
+    final res = await _channel.invokeMethod("get_conference_participant_count");
+    _log("getConferenceParticipantCount", data: res);
+    return res;
+  }
+
+  /// Get a list of conference participant display names/URIs.
+  Future<List<String>> getConferenceParticipants() async {
+    final res = await _channel.invokeMethod("get_conference_participants");
+    _log("getConferenceParticipants", data: res);
+    return List<String>.from(res ?? []);
+  }
+
+  /// Merge all current calls into the conference.
+  Future<bool> mergeCallsToConference() async {
+    final res = await _channel.invokeMethod("merge_calls_to_conference");
+    _log("mergeCallsToConference", data: res);
+    return res;
+  }
+
   /// Get call history/logs
   Future<CallLogs> callLogs() async {
     _log("callLogs request");

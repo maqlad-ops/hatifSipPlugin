@@ -1384,7 +1384,7 @@ public class LinPhoneHelper {
     }
 
     // ================================================================
-    //  CALL TRANSFER (Blind & Attended)
+    // CALL TRANSFER (Blind & Attended)
     // ================================================================
 
     /**
@@ -1396,11 +1396,13 @@ public class LinPhoneHelper {
      * @return true if the REFER was sent successfully
      */
     public boolean blindTransfer(String destination) {
-        if (core == null || core.getCallsNb() == 0) return false;
+        if (core == null || core.getCallsNb() == 0)
+            return false;
         Call currentCall = core.getCurrentCall();
         if (currentCall == null && core.getCalls().length > 0)
             currentCall = core.getCalls()[0];
-        if (currentCall == null) return false;
+        if (currentCall == null)
+            return false;
 
         Address address = core.interpretUrl(destination);
         if (address == null) {
@@ -1416,12 +1418,12 @@ public class LinPhoneHelper {
      * Attended (consultative) transfer.
      *
      * Steps:
-     *  1. The current call (A-B) is automatically paused.
-     *  2. A new outgoing call is placed to [destination] (A-C).
-     *  3. Once the consultant call (A-C) is connected the Flutter / native
-     *     UI should call {@link #completeAttendedTransfer()} which executes
-     *     {@code callB.transferToAnother(callC)} — the SIP stack then bridges
-     *     B and C and drops A.
+     * 1. The current call (A-B) is automatically paused.
+     * 2. A new outgoing call is placed to [destination] (A-C).
+     * 3. Once the consultant call (A-C) is connected the Flutter / native
+     * UI should call {@link #completeAttendedTransfer()} which executes
+     * {@code callB.transferToAnother(callC)} — the SIP stack then bridges
+     * B and C and drops A.
      *
      * This method performs steps 1-2. Step 3 is triggered separately so the
      * agent can speak with C before completing the transfer.
@@ -1430,11 +1432,13 @@ public class LinPhoneHelper {
      * @return true if the consultation call was initiated
      */
     public boolean attendedTransfer(String destination) {
-        if (core == null || core.getCallsNb() == 0) return false;
+        if (core == null || core.getCallsNb() == 0)
+            return false;
         Call currentCall = core.getCurrentCall();
         if (currentCall == null && core.getCalls().length > 0)
             currentCall = core.getCalls()[0];
-        if (currentCall == null) return false;
+        if (currentCall == null)
+            return false;
 
         Address address = core.interpretUrl(destination);
         if (address == null) {
@@ -1463,8 +1467,8 @@ public class LinPhoneHelper {
      * Complete the attended transfer: bridge the two calls.
      *
      * Expects exactly 2 calls:
-     *   - The original (on hold / paused)
-     *   - The consultation call (connected / streaming)
+     * - The original (on hold / paused)
+     * - The consultation call (connected / streaming)
      *
      * Executes {@code pausedCall.transferToAnother(activeCall)}.
      *
@@ -1500,10 +1504,12 @@ public class LinPhoneHelper {
 
     /**
      * Cancel the attended transfer: hang up the consultation call, resume original.
+     * 
      * @return true if cancelled successfully
      */
     public boolean cancelAttendedTransfer() {
-        if (core == null) return false;
+        if (core == null)
+            return false;
 
         Call pausedCall = null;
         Call activeCall = null;
@@ -1550,7 +1556,8 @@ public class LinPhoneHelper {
      * StreamsRunning or Connected state.
      */
     public boolean isConsultCallConnected() {
-        if (core == null || core.getCalls().length < 2) return false;
+        if (core == null || core.getCalls().length < 2)
+            return false;
         boolean hasPaused = false;
         boolean hasActive = false;
         for (Call c : core.getCalls()) {
@@ -1568,22 +1575,196 @@ public class LinPhoneHelper {
      * Get a human-readable label for the consultation call state.
      */
     public String getConsultCallStateLabel() {
-        if (core == null || core.getCalls().length < 2) return "";
+        if (core == null || core.getCalls().length < 2)
+            return "";
         for (Call c : core.getCalls()) {
             Call.State st = c.getState();
             if (st != Call.State.Paused && st != Call.State.PausedByRemote) {
                 switch (st) {
-                    case OutgoingInit: return "Initiating…";
-                    case OutgoingProgress: return "Calling…";
-                    case OutgoingRinging: return "Ringing…";
-                    case OutgoingEarlyMedia: return "Connecting…";
-                    case Connected: return "Connected";
-                    case StreamsRunning: return "Connected";
-                    default: return st.name();
+                    case OutgoingInit:
+                        return "Initiating…";
+                    case OutgoingProgress:
+                        return "Calling…";
+                    case OutgoingRinging:
+                        return "Ringing…";
+                    case OutgoingEarlyMedia:
+                        return "Connecting…";
+                    case Connected:
+                        return "Connected";
+                    case StreamsRunning:
+                        return "Connected";
+                    default:
+                        return st.name();
                 }
             }
         }
         return "";
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Conference (3-way / N-way merge)
+    // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * Start a conference by merging all current calls.
+     * If a local conference does not yet exist, one is created
+     * and every call in the core is added to it.
+     *
+     * @return true if the conference was started / calls merged
+     */
+    public boolean startConference() {
+        if (core == null || core.getCallsNb() < 2) {
+            Log.w(TAG, "startConference: need at least 2 calls, have " +
+                    (core != null ? core.getCallsNb() : 0));
+            return false;
+        }
+
+        org.linphone.core.Conference conf = core.getConference();
+        if (conf == null) {
+            // Create a new local conference and add all calls
+            CallParams params = core.createCallParams(null);
+            conf = core.createConferenceWithParams(core.createConferenceParams());
+            if (conf == null) {
+                // Fallback: just use enterConference which auto-creates
+                core.addAllToConference();
+                Log.d(TAG, "startConference: addAllToConference()");
+                return true;
+            }
+        }
+        // Add each call to the conference
+        core.addAllToConference();
+        Log.d(TAG, "startConference: merged " + core.getCallsNb() + " calls into conference");
+        return true;
+    }
+
+    /**
+     * Add a new participant to an existing conference by dialing them.
+     * If no conference exists, it will be created from the current call
+     * plus the new participant once they answer.
+     *
+     * @param destination SIP URI or phone number of the new participant
+     * @return true if the outgoing call was placed
+     */
+    public boolean addToConference(String destination) {
+        if (core == null)
+            return false;
+
+        Address address = core.interpretUrl(destination);
+        if (address == null) {
+            Log.e(TAG, "addToConference: cannot interpret destination=" + destination);
+            return false;
+        }
+
+        CallParams params = core.createCallParams(null);
+        if (params != null) {
+            params.setMediaEncryption(MediaEncryption.None);
+        }
+
+        Log.d(TAG, "addToConference: calling " + destination);
+        Call newCall = core.inviteAddressWithParams(address, params != null ? params : core.createCallParams(null));
+        // The new call will be added to the conference once answered via
+        // addAllToConference
+        return newCall != null;
+    }
+
+    /**
+     * Remove a specific participant from the conference.
+     *
+     * @param address SIP address/username to remove
+     * @return true if removed
+     */
+    public boolean removeFromConference(String address) {
+        if (core == null)
+            return false;
+        org.linphone.core.Conference conf = core.getConference();
+        if (conf == null) {
+            Log.w(TAG, "removeFromConference: no active conference");
+            return false;
+        }
+
+        // Find the call matching the address and remove
+        for (Call c : core.getCalls()) {
+            if (c.getRemoteAddress() != null) {
+                String remote = c.getRemoteAddress().getUsername();
+                if (remote != null && remote.contains(address)) {
+                    conf.removeParticipant(c);
+                    Log.d(TAG, "removeFromConference: removed " + address);
+                    return true;
+                }
+            }
+        }
+        Log.w(TAG, "removeFromConference: participant not found " + address);
+        return false;
+    }
+
+    /**
+     * Leave (end) the conference. All participants are disconnected.
+     *
+     * @return true if conference was terminated
+     */
+    public boolean endConference() {
+        if (core == null)
+            return false;
+        org.linphone.core.Conference conf = core.getConference();
+        if (conf != null) {
+            core.terminateConference();
+            Log.d(TAG, "endConference: conference terminated");
+            return true;
+        }
+        Log.w(TAG, "endConference: no active conference");
+        return false;
+    }
+
+    /**
+     * Check if a conference is currently active.
+     */
+    public boolean isInConference() {
+        if (core == null)
+            return false;
+        return core.getConference() != null && core.isInConference();
+    }
+
+    /**
+     * Get the number of participants in the conference (including local).
+     */
+    public int getConferenceParticipantCount() {
+        if (core == null)
+            return 0;
+        org.linphone.core.Conference conf = core.getConference();
+        if (conf == null)
+            return 0;
+        return conf.getParticipantCount() + 1; // +1 for local user
+    }
+
+    /**
+     * Get a list of participant display names / URIs.
+     */
+    public List<String> getConferenceParticipants() {
+        List<String> list = new ArrayList<>();
+        if (core == null)
+            return list;
+        org.linphone.core.Conference conf = core.getConference();
+        if (conf == null)
+            return list;
+        for (org.linphone.core.Participant p : conf.getParticipantList()) {
+            Address addr = p.getAddress();
+            String name = addr.getDisplayName();
+            if (name == null || name.isEmpty())
+                name = addr.getUsername();
+            list.add(name != null ? name : addr.asString());
+        }
+        return list;
+    }
+
+    /**
+     * Merge all current calls into the conference (useful after adding a new call).
+     */
+    public boolean mergeCallsToConference() {
+        if (core == null || core.getCallsNb() < 2)
+            return false;
+        core.addAllToConference();
+        Log.d(TAG, "mergeCallsToConference: merged all calls");
+        return true;
     }
 
     public String callLogs() {
@@ -1828,6 +2009,15 @@ public class LinPhoneHelper {
      */
     public boolean hasActiveCall() {
         return core != null && core.getCallsNb() > 0;
+    }
+
+    /**
+     * Get all current calls from the core.
+     */
+    public Call[] getCalls() {
+        if (core == null)
+            return new Call[0];
+        return core.getCalls();
     }
 
     /**
