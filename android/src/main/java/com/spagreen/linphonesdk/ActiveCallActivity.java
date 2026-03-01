@@ -581,8 +581,22 @@ public class ActiveCallActivity extends Activity {
         if (helper == null)
             return;
         helper.toggleSpeaker();
-        isSpeaker = helper.isSpeakerEnabled();
+        // Optimistic UI: flip immediately
+        isSpeaker = !isSpeaker;
         updateSpeakerUI();
+        // Then verify actual state after the audio route change settles
+        if (handler != null) {
+            handler.postDelayed(() -> {
+                LinPhoneHelper h = LinPhoneHelper.getInstance();
+                if (h != null) {
+                    boolean actual = h.isSpeakerEnabled();
+                    if (actual != isSpeaker) {
+                        isSpeaker = actual;
+                        updateSpeakerUI();
+                    }
+                }
+            }, 300);
+        }
     }
 
     // ==================================================================

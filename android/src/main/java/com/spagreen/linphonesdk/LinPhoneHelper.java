@@ -1354,9 +1354,15 @@ public class LinPhoneHelper {
     /**
      * Abandon audio focus when call ends
      */
+    @SuppressWarnings("deprecation")
     private void abandonAudioFocus() {
         if (audioManager == null)
             return;
+
+        // Clear communication device on API 31+ to restore default audio route
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            audioManager.clearCommunicationDevice();
+        }
 
         // Restore original audio state
         audioManager.setMode(originalAudioMode);
@@ -1612,51 +1618,111 @@ public class LinPhoneHelper {
         }
 
         Call currentCall = core.getCurrentCall();
+
+        // Refresh audio devices so we see the latest OS-level state
+        core.reloadSoundDevices();
+
         AudioDevice currentAudioDevice = currentCall.getOutputAudioDevice();
+        boolean speakerEnabled;
 
-        if (currentAudioDevice == null) {
-            Log.e(TAG, "toggleSpeaker: No current audio device");
-            // Try to set speaker as default
-            routeAudioToSpeaker();
-            return;
-        }
-
-        boolean speakerEnabled = currentAudioDevice.getType() == AudioDevice.Type.Speaker;
-        Log.d(TAG, "toggleSpeaker: Current device = " + currentAudioDevice.getType() + ", Speaker enabled = "
-                + speakerEnabled);
-
-        AudioDevice[] audioDevices = core.getAudioDevices();
-
-        for (AudioDevice audioDevice : audioDevices) {
-            Log.d(TAG, "Available audio device: " + audioDevice.getType() + " - " + audioDevice.getDeviceName());
-
-            if (speakerEnabled && audioDevice.getType() == AudioDevice.Type.Earpiece) {
-                currentCall.setOutputAudioDevice(audioDevice);
-                currentCall.setInputAudioDevice(audioDevice);
-                audioManager.setSpeakerphoneOn(false);
-                Log.d(TAG, "Switched to Earpiece");
-                pushCallDetailsToService(currentCall, "In Call");
-                return;
-            } else if (!speakerEnabled && audioDevice.getType() == AudioDevice.Type.Speaker) {
-                currentCall.setOutputAudioDevice(audioDevice);
-                audioManager.setSpeakerphoneOn(true);
-                Log.d(TAG, "Switched to Speaker");
-                pushCallDetailsToService(currentCall, "In Call");
-                return;
-            }
-        }
-
-        // Fallback: Use AudioManager if no suitable device found
-        if (speakerEnabled) {
-            audioManager.setSpeakerphoneOn(false);
-            Log.d(TAG, "Fallback: Disabled speaker via AudioManager");
+        if (currentAudioDevice != null) {
+            speakerEnabled = currentAudioDevice.getType() == AudioDevice.Type.Speaker;
         } else {
-            audioManager.setSpeakerphoneOn(true);
-            Log.d(TAG, "Fallback: Enabled speaker via AudioManager");
+            // No Linphone device — infer from AudioManager
+            speakerEnabled = audioManager != null && audioManager.isSpeakerphoneOn();
+            Log.w(TAG, "toggleSpeaker: No current audio device, inferred speaker=" + speakerEnabled);
         }
+
+        Log.d(TAG, "toggleSpeaker: speaker currently " + speakerEnabled + ", switching to " + (speakerEnabled ? "Earpiece" : "Speaker"));
+
+        if (speakerEnabled) {
+            applyAudioRoute(currentCall, AudioDevice.Type.Earpiece);
+        } else {
+            applyAudioRoute(currentCall, AudioDevice.Type.Speaker);
+        }
+
         // Update the notification with new speaker state
         if (core.getCurrentCall() != null) {
             pushCallDetailsToService(core.getCurrentCall(), "In Call");
+        }
+    }
+
+    /**
+     * Central audio-route helper.
+     * Routes via Linphone SDK first (which manages OS routing internally).
+     * Falls back to AudioManager only when no matching SDK device exists,
+     * using setCommunicationDevice() on API 31+ per Android docs.
+     */
+    private void applyAudioRoute(Call call, AudioDevice.Type targetType) {
+        AudioDevice[] audioDevices = core.getAudioDevices();
+        AudioDevice targetDevice = null;
+
+        for (AudioDevice d : audioDevices) {
+            if (d.getType() == targetType) {
+                targetDevice = d;
+                break;
+            }
+        }
+
+        if (targetDevice != null) {
+            // Let Linphone SDK handle the OS-level audio route internally.
+            // Do NOT call audioManager.setSpeakerphoneOn() — it races with
+            // the SDK's own AudioHelper and causes the "8 presses" bug.
+            call.setOutputAudioDevice(targetDevice);
+            Log.d(TAG, "applyAudioRoute: Linphone routed to " + targetDevice.getType()
+                    + " (" + targetDevice.getDeviceName() + ")");
+        } else {
+            // Fallback: no matching Linphone device — use AudioManager directly
+            Log.w(TAG, "applyAudioRoute: No Linphone device for " + targetType + ", using AudioManager fallback");
+            boolean wantSpeaker = (targetType == AudioDevice.Type.Speaker);
+            applyAudioManagerFallback(wantSpeaker);
+        }
+    }
+
+    /**
+     * AudioManager fallback: uses setCommunicationDevice() on API 31+ (per
+     * https://developer.android.com/reference/android/media/AudioManager),
+     * falls back to deprecated setSpeakerphoneOn() on older APIs.
+     */
+    @SuppressWarnings("deprecation")
+    private void applyAudioManagerFallback(boolean speaker) {
+        if (audioManager == null) return;
+
+        // Ensure correct audio mode
+        if (audioManager.getMode() != AudioManager.MODE_IN_COMMUNICATION) {
+            audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) { // API 31+
+            // Modern API: setCommunicationDevice
+            if (speaker) {
+                // Clear any previous communication device to let the platform
+                // route to speaker (the default loud route).
+                audioManager.clearCommunicationDevice();
+                // Find and set the speaker device
+                for (android.media.AudioDeviceInfo info : audioManager.getAvailableCommunicationDevices()) {
+                    if (info.getType() == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                        audioManager.setCommunicationDevice(info);
+                        Log.d(TAG, "AudioManager (API31+): set communication device to speaker");
+                        return;
+                    }
+                }
+                // If no explicit speaker device, clearing is sufficient
+                Log.d(TAG, "AudioManager (API31+): cleared communication device (routes to speaker)");
+            } else {
+                // Route to earpiece
+                for (android.media.AudioDeviceInfo info : audioManager.getAvailableCommunicationDevices()) {
+                    if (info.getType() == android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE) {
+                        audioManager.setCommunicationDevice(info);
+                        Log.d(TAG, "AudioManager (API31+): set communication device to earpiece");
+                        return;
+                    }
+                }
+            }
+        } else {
+            // Legacy API
+            audioManager.setSpeakerphoneOn(speaker);
+            Log.d(TAG, "AudioManager (legacy): setSpeakerphoneOn=" + speaker);
         }
     }
 
@@ -1667,20 +1733,8 @@ public class LinPhoneHelper {
         if (core == null || core.getCurrentCall() == null)
             return;
 
-        Call currentCall = core.getCurrentCall();
-        AudioDevice[] audioDevices = core.getAudioDevices();
-
-        for (AudioDevice audioDevice : audioDevices) {
-            if (audioDevice.getType() == AudioDevice.Type.Speaker) {
-                currentCall.setOutputAudioDevice(audioDevice);
-                audioManager.setSpeakerphoneOn(true);
-                Log.d(TAG, "Routed audio to Speaker");
-                return;
-            }
-        }
-
-        // Fallback
-        audioManager.setSpeakerphoneOn(true);
+        core.reloadSoundDevices();
+        applyAudioRoute(core.getCurrentCall(), AudioDevice.Type.Speaker);
     }
 
     /**
@@ -1690,21 +1744,8 @@ public class LinPhoneHelper {
         if (core == null || core.getCurrentCall() == null)
             return;
 
-        Call currentCall = core.getCurrentCall();
-        AudioDevice[] audioDevices = core.getAudioDevices();
-
-        for (AudioDevice audioDevice : audioDevices) {
-            if (audioDevice.getType() == AudioDevice.Type.Earpiece) {
-                currentCall.setOutputAudioDevice(audioDevice);
-                currentCall.setInputAudioDevice(audioDevice);
-                audioManager.setSpeakerphoneOn(false);
-                Log.d(TAG, "Routed audio to Earpiece");
-                return;
-            }
-        }
-
-        // Fallback
-        audioManager.setSpeakerphoneOn(false);
+        core.reloadSoundDevices();
+        applyAudioRoute(core.getCurrentCall(), AudioDevice.Type.Earpiece);
     }
 
     /**
@@ -1748,15 +1789,24 @@ public class LinPhoneHelper {
     }
 
     /**
-     * Check if speaker is currently active
+     * Check if speaker is currently active.
+     * Uses both Linphone SDK device type AND AudioManager as cross-check.
      */
     public boolean isSpeakerEnabled() {
         if (core == null || core.getCurrentCall() == null) {
             return audioManager != null && audioManager.isSpeakerphoneOn();
         }
 
+        // Refresh so we report the actual OS state
+        core.reloadSoundDevices();
+
         AudioDevice currentDevice = core.getCurrentCall().getOutputAudioDevice();
-        return currentDevice != null && currentDevice.getType() == AudioDevice.Type.Speaker;
+        if (currentDevice != null) {
+            return currentDevice.getType() == AudioDevice.Type.Speaker;
+        }
+
+        // Device is null — fall back to AudioManager
+        return audioManager != null && audioManager.isSpeakerphoneOn();
     }
 
     public void answerCall() {
