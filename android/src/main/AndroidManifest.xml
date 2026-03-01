@@ -1,4 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
     package="com.spagreen.linphonesdk">
 
     <!-- =============================
@@ -59,21 +60,51 @@
          ============================= -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- =============================
+         FULL-SCREEN INTENT - For incoming call screen over lock screen
+         ============================= -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <application
         android:usesCleartextTraffic="true">
 
-        <!-- Linphone Core Service for background operation -->
+        <!-- Linphone SDK's built-in CoreService COMPLETELY REMOVED.
+             We handle iteration, keep-alive, and foreground notifications
+             ourselves via SipForegroundService + LinPhoneHelper.
+             tools:node="remove" prevents the SDK from merging its own
+             declaration back in via its AAR manifest. -->
         <service
             android:name="org.linphone.core.tools.service.CoreService"
-            android:foregroundServiceType="phoneCall|camera|microphone"
-            android:stopWithTask="false"
-            android:exported="false" />
+            tools:node="remove" />
 
         <!-- Our foreground service to keep SIP alive for incoming calls -->
         <service
             android:name="com.spagreen.linphonesdk.SipForegroundService"
             android:foregroundServiceType="phoneCall|microphone"
             android:stopWithTask="false"
+            android:exported="false" />
+
+        <!-- Native incoming call screen – shows over lock screen -->
+        <activity
+            android:name="com.spagreen.linphonesdk.IncomingCallActivity"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:exported="false" />
+
+        <!-- Native active (in-call) screen -->
+        <activity
+            android:name="com.spagreen.linphonesdk.ActiveCallActivity"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
             android:exported="false" />
 
     </application>

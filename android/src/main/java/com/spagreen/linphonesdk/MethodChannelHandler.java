@@ -7,8 +7,6 @@ import android.util.Log;
 
 import androidx.annotation.NonNull;
 
-import org.linphone.core.TransportType;
-
 import java.util.Map;
 
 import io.flutter.plugin.common.MethodCall;
@@ -25,17 +23,11 @@ import io.flutter.plugin.common.MethodChannel;
  */
 public class MethodChannelHandler implements MethodChannel.MethodCallHandler {
     private final String TAG = MethodChannelHandler.class.getSimpleName();
-    private EventChannelHelper loginEventListener;
-    private EventChannelHelper callEventListener;
     private LinPhoneHelper linPhoneHelper;
     private Activity activity;
 
-    public MethodChannelHandler(Activity activity,
-            EventChannelHelper loginEventListener, EventChannelHelper callEventListener) {
-
-        this.loginEventListener = loginEventListener;
-        this.callEventListener = callEventListener;
-        this.linPhoneHelper = new LinPhoneHelper(activity, loginEventListener, callEventListener);
+    public MethodChannelHandler(Activity activity, LinPhoneHelper linPhoneHelper) {
+        this.linPhoneHelper = linPhoneHelper;
         this.activity = activity;
     }
 
@@ -235,6 +227,23 @@ public class MethodChannelHandler implements MethodChannel.MethodCallHandler {
                 result.success(linPhoneHelper.getRegistrationInfo());
                 break;
 
+            case "get_call_data":
+                Log.d(TAG, "get_call_data requested");
+                result.success(linPhoneHelper.getCallDataJson());
+                break;
+
+            case "start_service":
+                Log.d(TAG, "start_service requested");
+                SipForegroundService.start(activity);
+                result.success(true);
+                break;
+
+            case "stop_service":
+                Log.d(TAG, "stop_service requested");
+                SipForegroundService.stopServiceCompletely(activity);
+                result.success(true);
+                break;
+
             default:
                 result.notImplemented();
                 break;
@@ -250,7 +259,10 @@ public class MethodChannelHandler implements MethodChannel.MethodCallHandler {
         String domain = (String) data.get("domain");
         String password = (String) data.get("password");
         Log.d(TAG, "handleLogin (UDP default) user=" + userName + " domain=" + domain);
-        linPhoneHelper.login(userName, domain, password);
+
+        // Store credentials and delegate login to the service so registration
+        // survives app termination.
+        SipForegroundService.loginViaService(activity, userName, domain, password, "udp");
         result.success("Success");
     }
 
@@ -265,32 +277,13 @@ public class MethodChannelHandler implements MethodChannel.MethodCallHandler {
         String password = (String) data.get("password");
         String transport = (String) data.get("transport");
 
-        TransportType transportType = parseTransportType(transport);
-        Log.d(TAG, "handleLoginWithTransport user=" + userName + " domain=" + domain + " transport="
-                + transportType.name());
-        linPhoneHelper.login(userName, domain, password, transportType);
+        Log.d(TAG, "handleLoginWithTransport user=" + userName + " domain=" + domain + " transport=" + transport);
+
+        // Store credentials and delegate login to the service so registration
+        // survives app termination.
+        SipForegroundService.loginViaService(activity, userName, domain, password,
+                transport != null ? transport : "udp");
         result.success("Success");
-    }
-
-    /**
-     * Parse transport type string to TransportType enum
-     */
-    private TransportType parseTransportType(String transport) {
-        if (transport == null)
-            return TransportType.Udp;
-
-        switch (transport.toLowerCase()) {
-            case "tcp":
-                Log.d(TAG, "parseTransportType -> TCP");
-                return TransportType.Tcp;
-            case "tls":
-                Log.d(TAG, "parseTransportType -> TLS");
-                return TransportType.Tls;
-            case "udp":
-            default:
-                Log.d(TAG, "parseTransportType -> UDP");
-                return TransportType.Udp;
-        }
     }
 
     /**
@@ -300,8 +293,22 @@ public class MethodChannelHandler implements MethodChannel.MethodCallHandler {
         try {
             String[] permissionArrays;
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                // Android 12+ requires BLUETOOTH_CONNECT
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                // Android 13+ requires POST_NOTIFICATIONS + BLUETOOTH_CONNECT
+                permissionArrays = new String[] {
+                        Manifest.permission.CAMERA,
+                        Manifest.permission.USE_SIP,
+                        Manifest.permission.RECORD_AUDIO,
+                        Manifest.permission.ACCESS_NETWORK_STATE,
+                        Manifest.permission.CHANGE_NETWORK_STATE,
+                        Manifest.permission.ACCESS_WIFI_STATE,
+                        Manifest.permission.CHANGE_WIFI_STATE,
+                        Manifest.permission.MODIFY_AUDIO_SETTINGS,
+                        Manifest.permission.BLUETOOTH_CONNECT,
+                        Manifest.permission.POST_NOTIFICATIONS,
+                };
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                // Android 12 requires BLUETOOTH_CONNECT
                 permissionArrays = new String[] {
                         Manifest.permission.CAMERA,
                         Manifest.permission.USE_SIP,

@@ -1,516 +1,689 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:linphone_flutter_plugin/linphoneflutterplugin.dart';
-import 'package:linphone_flutter_plugin/CallLog.dart';
-import 'package:linphone_flutter_plugin/call_state.dart';
-import 'dart:async';
 import 'package:linphone_flutter_plugin/login_state.dart';
 
 void main() {
   runApp(const MyApp());
 }
 
-// Main application widget
 class MyApp extends StatefulWidget {
-  const MyApp({Key? key}) : super(key: key);
+  const MyApp({super.key});
 
   @override
   State<MyApp> createState() => _MyAppState();
 }
 
 class _MyAppState extends State<MyApp> {
-  // Instance of the Linphone Flutter Plugin
   final _linphoneSdkPlugin = LinphoneFlutterPlugin();
 
-  // TextEditingControllers for handling user input in text fields
   late TextEditingController _userController;
   late TextEditingController _passController;
   late TextEditingController _domainController;
   final _textEditingController = TextEditingController();
 
-  // Selected transport type for SIP connection
-  // TCP recommended: avoids UDP MTU fragmentation issues with large SIP INVITE
-  SipTransport _selectedTransport = SipTransport.tcp;
+  SipTransport _selectedTransport = SipTransport.udp;
 
-  // Navigator key – needed so showDialog uses a context BELOW MaterialApp
-  final _navigatorKey = GlobalKey<NavigatorState>();
-
-  // Track whether the incoming-call dialog is currently showing
-  bool _incomingDialogShowing = false;
-
-  // Cached event streams — MUST be created once, not inside build().
-  // Creating a new stream on every rebuild triggers onCancel+onListen on the
-  // native EventChannel, briefly setting eventSink to null and dropping events.
+  // Cached streams
   late final Stream<LoginState> _loginStream;
-  late final Stream<CallState> _callStream;
+  Stream<Map<String, dynamic>>? _callDataStream;
+  StreamSubscription<Map<String, dynamic>>? _callDataSub;
+
+  // Call data state
+  Map<String, dynamic> _callData = {};
+
+  bool _permissionsGranted = false;
+  bool _serviceStarted = false;
 
   @override
   void initState() {
     super.initState();
-
-    // Cache event streams once
     _loginStream = _linphoneSdkPlugin.addLoginListener();
-    _callStream = _linphoneSdkPlugin.addCallStateListener();
 
-    // Initialize TextEditingControllers with default values
     _userController = TextEditingController(text: "1039");
     _passController =
         TextEditingController(text: "61c1df965857b9b9d2df320ee163a268");
     _domainController = TextEditingController(text: "main.egytelecoms.com");
 
-    // Request necessary permissions for using Linphone features
-    requestPermissions();
+    // Request permissions on startup
+    _requestPermissionsAndStart();
   }
 
-  /// Show the incoming-call dialog (only once).
-  void _showIncomingCallDialog() {
-    if (_incomingDialogShowing) return;
-    final ctx = _navigatorKey.currentContext;
-    if (ctx == null) return;
+  // ---------------------------------------------------------------
+  // Permission & service startup
+  // ---------------------------------------------------------------
 
-    _incomingDialogShowing = true;
-    showDialog(
-      context: ctx,
-      barrierDismissible: false,
-      builder: (_) => AlertDialog(
-        title: const Text('Incoming Call'),
-        content: const Text('You have an incoming call.'),
-        actions: [
-          TextButton(
-            onPressed: () async {
-              await reject();
-              _dismissIncomingCallDialog();
-            },
-            child: const Text('Reject'),
-          ),
-          TextButton(
-            onPressed: () async {
-              await answer();
-              _dismissIncomingCallDialog();
-            },
-            child: const Text('Answer'),
-          ),
-        ],
-      ),
-    ).then((_) {
-      // Dialog was dismissed (e.g. back button)
-      _incomingDialogShowing = false;
+  Future<void> _requestPermissionsAndStart() async {
+    try {
+      await _linphoneSdkPlugin.requestPermissions();
+      setState(() => _permissionsGranted = true);
+
+      // Start listening to call data after permissions are granted
+      _startCallDataListener();
+    } catch (e) {
+      print("Permissions not granted: $e");
+      // Still allow the UI to show — user can retry
+    }
+  }
+
+  void _startCallDataListener() {
+    _callDataStream = _linphoneSdkPlugin.addCallDataListener();
+    _callDataSub = _callDataStream?.listen((data) {
+      if (mounted) {
+        setState(() => _callData = data);
+      }
+    }, onError: (e) {
+      print("Call data stream error: $e");
     });
   }
 
-  /// Dismiss the incoming-call dialog if it's showing.
-  void _dismissIncomingCallDialog() {
-    if (!_incomingDialogShowing) return;
-    final ctx = _navigatorKey.currentContext;
-    if (ctx != null) {
-      Navigator.of(ctx).pop();
-    }
-    _incomingDialogShowing = false;
-  }
+  // ---------------------------------------------------------------
+  // Actions
+  // ---------------------------------------------------------------
 
-  // Request permissions needed by the Linphone SDK
-  Future<void> requestPermissions() async {
-    try {
-      await _linphoneSdkPlugin.requestPermissions();
-    } catch (e) {
-      print("Error on request permission. ${e.toString()}");
-    }
-  }
-
-  // Login method to authenticate the user using Linphone
   Future<void> login({
     required String username,
     required String pass,
     required String domain,
     required SipTransport transport,
   }) async {
+    if (!_permissionsGranted) {
+      await _requestPermissionsAndStart();
+      if (!_permissionsGranted) return;
+    }
     try {
       await _linphoneSdkPlugin.loginWithTransport(
           userName: username,
           domain: domain,
           password: pass,
           transport: transport);
+      setState(() => _serviceStarted = true);
     } catch (e) {
-      // Show error message if login fails
-      print("Error on login. ${e.toString()}");
+      print("Error on login: $e");
     }
   }
 
-  // Method to initiate a call using the Linphone SDK
   Future<void> call() async {
     if (_textEditingController.text.isNotEmpty) {
       String number = _textEditingController.text;
       try {
         await _linphoneSdkPlugin.call(number: number);
       } catch (e) {
-        // Show error message if the call fails
-        print("Error on call. ${e.toString()}");
+        print("Error on call: $e");
       }
     }
   }
 
-  // Method to transfer an ongoing call to another number
-  Future<void> forward() async {
-    try {
-      await _linphoneSdkPlugin.callTransfer(destination: "1000");
-    } catch (e) {
-      // Show error message if call transfer fails
-      print("Error on call transfer. ${e.toString()}");
-    }
-  }
-
-  // Method to hang up an ongoing call
   Future<void> hangUp() async {
     try {
       await _linphoneSdkPlugin.hangUp();
     } catch (e) {
-      // Show error message if hang up fails
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Hang up failed: ${e.toString()}")),
-      );
+      print("Error on hang up: $e");
     }
   }
 
-  // Method to toggle the speaker on/off
+  Future<void> toggleMute() async {
+    try {
+      await _linphoneSdkPlugin.toggleMute();
+    } catch (e) {
+      print("Error on mute: $e");
+    }
+  }
+
   Future<void> toggleSpeaker() async {
     try {
       await _linphoneSdkPlugin.toggleSpeaker();
     } catch (e) {
-      // Show error message if toggling the speaker fails
-      print("Error on toggle speaker. ${e.toString()}");
+      print("Error on speaker: $e");
     }
   }
 
-  // Method to toggle mute on/off
-  Future<void> toggleMute() async {
-    try {
-      bool isMuted = await _linphoneSdkPlugin.toggleMute();
-      // Show feedback to the user about the mute status
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(isMuted ? "Muted" : "Unmuted")),
-      );
-    } catch (e) {
-      // Show error message if toggling mute fails
-      print("Error on toggle mute. ${e.toString()}");
-    }
-  }
-
-  // Method to answer an incoming call
-  Future<void> answer() async {
-    try {
-      await _linphoneSdkPlugin.answercall();
-    } catch (e) {
-      // Show error message if answering the call fails
-      print("Error on answer call. ${e.toString()}");
-    }
-  }
-
-  // Method to reject an incoming call
-  Future<void> reject() async {
-    try {
-      await _linphoneSdkPlugin.rejectCall();
-    } catch (e) {
-      // Show error message if rejecting the call fails
-      print("Error on reject call. ${e.toString()}");
-    }
-  }
-
-  // Method to retrieve and print the call logs
-  Future<void> callLogs() async {
-    try {
-      CallLogs callLogs = await _linphoneSdkPlugin.callLogs();
-      print("---------call logs length: ${callLogs.callHistory.length}");
-    } catch (e) {
-      // Show error message if fetching call logs fails
-      print("Error on call logs. ${e.toString()}");
-    }
-  }
-
-  // Show diagnostic registration info
-  Future<void> showDiagnostics() async {
-    try {
-      final info = await _linphoneSdkPlugin.getRegistrationInfo();
-      final buffer = StringBuffer();
-      info.forEach((k, v) => buffer.writeln('$k: $v'));
-      final ctx = _navigatorKey.currentContext;
-      if (ctx == null) return;
-      showDialog(
-        context: ctx,
-        builder: (_) => AlertDialog(
-          title: const Text('SIP Diagnostics'),
-          content: SingleChildScrollView(
-            child:
-                Text(buffer.toString(), style: const TextStyle(fontSize: 12)),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('OK'),
-            ),
-          ],
-        ),
-      );
-    } catch (e) {
-      print("Diagnostics error: $e");
-    }
-  }
+  // ---------------------------------------------------------------
+  // Build
+  // ---------------------------------------------------------------
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      navigatorKey: _navigatorKey,
-      theme: ThemeData(
-        primarySwatch: Colors.blue,
-        visualDensity: VisualDensity.adaptivePlatformDensity,
-      ),
-      home: Scaffold(
-        appBar: AppBar(
-          title: const Text('Linphone Flutter Plugin Example'),
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: const Color(0xFF1c1c1e),
+        colorScheme: ColorScheme.dark(
+          primary: const Color(0xFF4facfe),
+          secondary: const Color(0xFF00f2fe),
         ),
-        body: ListView(
-          padding: const EdgeInsets.all(20),
-          children: [
-            // Username input field
-            TextFormField(
-              controller: _userController,
-              decoration: const InputDecoration(
-                icon: Icon(Icons.person),
-                hintText: "Input username",
-                labelText: "Username",
-              ),
-            ),
-            // Password input field
-            TextFormField(
-              controller: _passController,
-              obscureText: true,
-              decoration: const InputDecoration(
-                icon: Icon(Icons.lock),
-                hintText: "Input password",
-                labelText: "Password",
-              ),
-            ),
-            // Domain input field
-            TextFormField(
-              controller: _domainController,
-              decoration: const InputDecoration(
-                icon: Icon(Icons.domain),
-                hintText: "Input domain",
-                labelText: "Domain",
-              ),
-            ),
-            const SizedBox(height: 16),
-            // Transport type dropdown
-            Row(
+      ),
+      home: _buildHomePage(),
+    );
+  }
+
+  Widget _buildHomePage() {
+    final bool hasActiveCall = _callData['hasActiveCall'] == true;
+
+    return Scaffold(
+      body: Container(
+        width: double.infinity,
+        height: double.infinity,
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              Color(0xFF1a1a2e),
+              Color(0xFF16213e),
+              Color(0xFF0f3460),
+            ],
+          ),
+        ),
+        child: SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Icon(Icons.swap_vert, color: Colors.grey),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: DropdownButtonFormField<SipTransport>(
-                    value: _selectedTransport,
-                    decoration: const InputDecoration(
-                      labelText: "Transport",
+                // Header
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF4facfe).withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: const Icon(Icons.phone_in_talk_rounded,
+                          color: Color(0xFF4facfe), size: 28),
                     ),
-                    items: SipTransport.values.map((transport) {
-                      return DropdownMenuItem<SipTransport>(
-                        value: transport,
-                        child: Text(transport.name.toUpperCase()),
-                      );
-                    }).toList(),
-                    onChanged: (SipTransport? newValue) {
-                      if (newValue != null) {
-                        setState(() {
-                          _selectedTransport = newValue;
-                        });
-                      }
-                    },
-                  ),
+                    const SizedBox(width: 14),
+                    const Text(
+                      'Hatif',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 26,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-            const SizedBox(height: 20),
-            // Login button
-            ElevatedButton(
-              onPressed: () {
-                login(
-                  username: _userController.text,
-                  pass: _passController.text,
-                  domain: _domainController.text,
-                  transport: _selectedTransport,
-                );
-              },
-              child: const Text("Login"),
-            ),
-            const SizedBox(height: 20),
-            // Display login status
-            StreamBuilder<LoginState>(
-              stream: _loginStream,
-              builder: (context, snapshot) {
-                LoginState status = snapshot.data ?? LoginState.none;
-                return Text("Login status: ${status.name}");
-              },
-            ),
-            const SizedBox(height: 20),
-            // Display call status
-            StreamBuilder<CallState>(
-              stream: _callStream,
-              builder: (context, snapshot) {
-                CallState? status = snapshot.data;
 
-                // Show incoming-call dialog via showDialog (not inline)
-                if (status == CallState.IncomingReceived) {
-                  // Schedule dialog after this build frame
-                  WidgetsBinding.instance.addPostFrameCallback((_) {
-                    _showIncomingCallDialog();
-                  });
-                }
+                const SizedBox(height: 20),
 
-                // Dismiss the incoming call dialog when the call is answered,
-                // rejected, ended, or released.
-                if (status == CallState.connected ||
-                    status == CallState.streamsRunning ||
-                    status == CallState.end ||
-                    status == CallState.released ||
-                    status == CallState.error) {
-                  _dismissIncomingCallDialog();
-                }
+                // Active call card (shown when there's a running call)
+                if (hasActiveCall) _buildActiveCallCard(),
 
-                // Active call UI (connected / streams running)
-                if (status == CallState.connected ||
-                    status == CallState.streamsRunning) {
-                  return Card(
-                    color: Colors.green.shade50,
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        children: [
-                          const Icon(Icons.call, color: Colors.green, size: 48),
-                          const SizedBox(height: 8),
-                          Text("Call Active (${status?.name})",
-                              style: const TextStyle(
-                                  fontSize: 18, fontWeight: FontWeight.bold)),
-                          const SizedBox(height: 16),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                if (hasActiveCall) const SizedBox(height: 20),
+
+                // Account & Service card
+                _buildGlassCard(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const Text(
+                        'Account',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+
+                      _buildTextField(
+                        controller: _userController,
+                        icon: Icons.person_outline,
+                        hint: 'Username',
+                      ),
+                      const SizedBox(height: 12),
+                      _buildTextField(
+                        controller: _passController,
+                        icon: Icons.lock_outline,
+                        hint: 'Password',
+                        obscure: true,
+                      ),
+                      const SizedBox(height: 12),
+                      _buildTextField(
+                        controller: _domainController,
+                        icon: Icons.dns_outlined,
+                        hint: 'Domain',
+                      ),
+                      const SizedBox(height: 12),
+
+                      // Transport dropdown
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.07),
+                          borderRadius: BorderRadius.circular(12),
+                          border:
+                              Border.all(color: Colors.white.withOpacity(0.1)),
+                        ),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<SipTransport>(
+                            value: _selectedTransport,
+                            dropdownColor: const Color(0xFF2c2c3e),
+                            style: const TextStyle(
+                                color: Colors.white, fontSize: 15),
+                            icon: const Icon(Icons.arrow_drop_down,
+                                color: Colors.white54),
+                            isExpanded: true,
+                            items: SipTransport.values.map((t) {
+                              return DropdownMenuItem(
+                                value: t,
+                                child: Text(t.name.toUpperCase()),
+                              );
+                            }).toList(),
+                            onChanged: _serviceStarted
+                                ? null
+                                : (v) {
+                                    if (v != null) {
+                                      setState(() => _selectedTransport = v);
+                                    }
+                                  },
+                          ),
+                        ),
+                      ),
+
+                      const SizedBox(height: 18),
+
+                      // Start / Stop Service button (= login / logout SIP)
+                      _buildGradientButton(
+                        label:
+                            _serviceStarted ? 'Stop Service' : 'Start Service',
+                        icon: _serviceStarted
+                            ? Icons.stop_circle_outlined
+                            : Icons.play_circle_outline,
+                        colors: _serviceStarted
+                            ? const [Color(0xFFe53935), Color(0xFFb71c1c)]
+                            : const [Color(0xFF4caf50), Color(0xFF2e7d32)],
+                        onPressed: () async {
+                          if (_serviceStarted) {
+                            await _linphoneSdkPlugin.stopService();
+                            setState(() => _serviceStarted = false);
+                          } else {
+                            // Start service = login SIP
+                            if (!_permissionsGranted) {
+                              await _requestPermissionsAndStart();
+                              if (!_permissionsGranted) return;
+                            }
+                            try {
+                              await _linphoneSdkPlugin.loginWithTransport(
+                                userName: _userController.text,
+                                domain: _domainController.text,
+                                password: _passController.text,
+                                transport: _selectedTransport,
+                              );
+                              setState(() => _serviceStarted = true);
+                            } catch (e) {
+                              print('Error starting service: $e');
+                            }
+                          }
+                        },
+                      ),
+
+                      const SizedBox(height: 14),
+
+                      // Registration status
+                      StreamBuilder<LoginState>(
+                        stream: _loginStream,
+                        builder: (context, snap) {
+                          final status = snap.data ?? LoginState.none;
+                          Color dotColor;
+                          String label;
+                          switch (status) {
+                            case LoginState.ok:
+                              dotColor = const Color(0xFF4caf50);
+                              label = 'REGISTERED';
+                              break;
+                            case LoginState.progress:
+                              dotColor = const Color(0xFFff9800);
+                              label = 'CONNECTING...';
+                              break;
+                            case LoginState.failed:
+                              dotColor = const Color(0xFFe53935);
+                              label = 'FAILED';
+                              break;
+                            default:
+                              dotColor = Colors.grey;
+                              label = 'OFFLINE';
+                          }
+                          return Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              ElevatedButton.icon(
-                                onPressed: toggleMute,
-                                icon: const Icon(Icons.mic_off),
-                                label: const Text("Mute"),
+                              Container(
+                                width: 10,
+                                height: 10,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: dotColor,
+                                  boxShadow: [
+                                    BoxShadow(
+                                        color: dotColor.withOpacity(0.5),
+                                        blurRadius: 6)
+                                  ],
+                                ),
                               ),
-                              ElevatedButton.icon(
-                                onPressed: toggleSpeaker,
-                                icon: const Icon(Icons.volume_up),
-                                label: const Text("Speaker"),
+                              const SizedBox(width: 8),
+                              Text(
+                                label,
+                                style: TextStyle(
+                                  color: Colors.white.withOpacity(0.7),
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w500,
+                                  letterSpacing: 1.2,
+                                ),
                               ),
                             ],
-                          ),
-                          const SizedBox(height: 12),
-                          ElevatedButton.icon(
-                            style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.red),
-                            onPressed: hangUp,
-                            icon: const Icon(Icons.call_end),
-                            label: const Text("Hang Up"),
-                          ),
-                        ],
+                          );
+                        },
                       ),
-                    ),
-                  );
-                }
+                    ],
+                  ),
+                ),
 
-                return Column(
-                  children: [
-                    Text("Call status: ${status?.name ?? 'none'}"),
-                    if (status == CallState.outgoingInit ||
-                        status == CallState.outgoingProgress ||
-                        status == CallState.outgoingRinging)
-                      ElevatedButton.icon(
-                        style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.red),
-                        onPressed: hangUp,
-                        icon: const Icon(Icons.call_end),
-                        label: const Text("Hang Up"),
+                const SizedBox(height: 20),
+
+                // Dialer card
+                _buildGlassCard(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const Text(
+                        'Dialer',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                  ],
-                );
-              },
+                      const SizedBox(height: 16),
+
+                      _buildTextField(
+                        controller: _textEditingController,
+                        icon: Icons.dialpad_rounded,
+                        hint: 'Enter number',
+                        keyboardType: TextInputType.phone,
+                      ),
+
+                      const SizedBox(height: 16),
+
+                      // Call button
+                      _buildGradientButton(
+                        label: 'Call',
+                        icon: Icons.call_rounded,
+                        colors: const [Color(0xFF4caf50), Color(0xFF2e7d32)],
+                        onPressed: call,
+                      ),
+                    ],
+                  ),
+                ),
+
+                const SizedBox(height: 30),
+              ],
             ),
-            const SizedBox(height: 20),
-            // Phone number input field
-            TextFormField(
-              controller: _textEditingController,
-              keyboardType: TextInputType.phone,
-              decoration: const InputDecoration(
-                icon: Icon(Icons.phone),
-                hintText: "Input number",
-                labelText: "Number",
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------
+  // Active Call Card
+  // ---------------------------------------------------------------
+
+  Widget _buildActiveCallCard() {
+    final callState = _callData['callState'] ?? 'Unknown';
+    final remoteName = _callData['remoteName'] ?? '';
+    final duration = _callData['duration'] ?? 0;
+    final muted = _callData['muted'] == true;
+    final speaker = _callData['speaker'] == true;
+    final onHold = _callData['onHold'] == true;
+
+    final durationStr = _formatDuration(duration);
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF1b5e20), Color(0xFF2e7d32)],
+        ),
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF4caf50).withOpacity(0.3),
+            blurRadius: 16,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.call, color: Colors.greenAccent, size: 22),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  remoteName.isNotEmpty ? remoteName : 'Call',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
               ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  callState,
+                  style: const TextStyle(color: Colors.white70, fontSize: 12),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(
+            durationStr,
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 28,
+              fontWeight: FontWeight.w300,
+              fontFamily: 'monospace',
             ),
-            const SizedBox(height: 20),
-            // Call button
-            ElevatedButton(onPressed: call, child: const Text("Call")),
-            const SizedBox(height: 20),
-            // Answer button
-            ElevatedButton(
-              onPressed: () {
-                answer();
-              },
-              child: const Text("Answer"),
-            ),
-            const SizedBox(height: 20),
-            // Reject button
-            ElevatedButton(
-              onPressed: () {
-                reject();
-              },
-              child: const Text("Reject"),
-            ),
-            // Hang up button
-            ElevatedButton(
-              onPressed: () {
-                hangUp();
-              },
-              child: const Text("Hang Up"),
-            ),
-            const SizedBox(height: 20),
-            // Toggle speaker button
-            ElevatedButton(
-              onPressed: () {
-                toggleSpeaker();
-              },
-              child: const Text("Speaker"),
-            ),
-            const SizedBox(height: 20),
-            // Toggle mute button
-            ElevatedButton(
-              onPressed: () {
-                toggleMute();
-              },
-              child: const Text("Mute"),
-            ),
-            const SizedBox(height: 20),
-            // Forward call button
-            ElevatedButton(
-              onPressed: () {
-                forward();
-              },
-              child: const Text("Forward"),
-            ),
-            const SizedBox(height: 20),
-            // Call log button
-            ElevatedButton(
-              onPressed: () {
-                callLogs();
-              },
-              child: const Text("Call Log"),
-            ),
-            const SizedBox(height: 20),
-            // Diagnostics button
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.orange),
-              onPressed: showDiagnostics,
-              child: const Text("SIP Diagnostics"),
-            ),
-          ],
+          ),
+          const SizedBox(height: 12),
+          // Status indicators
+          Wrap(
+            spacing: 8,
+            children: [
+              if (muted) _buildStatusChip('Muted', Icons.mic_off),
+              if (speaker) _buildStatusChip('Speaker', Icons.volume_up),
+              if (onHold) _buildStatusChip('On Hold', Icons.pause),
+            ],
+          ),
+          const SizedBox(height: 16),
+          // Action buttons
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: toggleMute,
+                  icon: Icon(muted ? Icons.mic : Icons.mic_off, size: 18),
+                  label: Text(muted ? 'Unmute' : 'Mute'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.white.withOpacity(0.15),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: toggleSpeaker,
+                  icon:
+                      Icon(speaker ? Icons.hearing : Icons.volume_up, size: 18),
+                  label: Text(speaker ? 'Earpiece' : 'Speaker'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.white.withOpacity(0.15),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: hangUp,
+                  icon: const Icon(Icons.call_end, size: 18),
+                  label: const Text('End'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFe53935),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatusChip(String label, IconData icon) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.12),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: Colors.white70),
+          const SizedBox(width: 4),
+          Text(label,
+              style: const TextStyle(color: Colors.white70, fontSize: 12)),
+        ],
+      ),
+    );
+  }
+
+  String _formatDuration(dynamic seconds) {
+    int s = (seconds is int) ? seconds : 0;
+    int h = s ~/ 3600;
+    int m = (s % 3600) ~/ 60;
+    int sec = s % 60;
+    if (h > 0) {
+      return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}';
+    }
+    return '${m.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}';
+  }
+
+  // ---------------------------------------------------------------
+  // UI Helpers
+  // ---------------------------------------------------------------
+
+  Widget _buildGlassCard({required Widget child}) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.06),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withOpacity(0.08)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.2),
+            blurRadius: 20,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: child,
+    );
+  }
+
+  Widget _buildTextField({
+    required TextEditingController controller,
+    required IconData icon,
+    required String hint,
+    bool obscure = false,
+    TextInputType keyboardType = TextInputType.text,
+  }) {
+    return TextField(
+      controller: controller,
+      obscureText: obscure,
+      keyboardType: keyboardType,
+      style: const TextStyle(color: Colors.white, fontSize: 15),
+      decoration: InputDecoration(
+        prefixIcon: Icon(icon, color: Colors.white38, size: 22),
+        hintText: hint,
+        hintStyle: TextStyle(color: Colors.white.withOpacity(0.3)),
+        filled: true,
+        fillColor: Colors.white.withOpacity(0.07),
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: Colors.white.withOpacity(0.1)),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: Colors.white.withOpacity(0.1)),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0xFF4facfe)),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGradientButton({
+    required String label,
+    required IconData icon,
+    required VoidCallback onPressed,
+    List<Color> colors = const [Color(0xFF4facfe), Color(0xFF00f2fe)],
+  }) {
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        gradient: LinearGradient(colors: colors),
+        boxShadow: [
+          BoxShadow(
+            color: colors.first.withOpacity(0.35),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: ElevatedButton.icon(
+        onPressed: onPressed,
+        icon: Icon(icon, size: 20),
+        label: Text(label,
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.transparent,
+          shadowColor: Colors.transparent,
+          padding: const EdgeInsets.symmetric(vertical: 14),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
         ),
       ),
     );
@@ -518,9 +691,8 @@ class _MyAppState extends State<MyApp> {
 
   @override
   void dispose() {
-    // Remove listeners and dispose of controllers to prevent memory leaks
+    _callDataSub?.cancel();
     _linphoneSdkPlugin.removeLoginListener();
-    _linphoneSdkPlugin.removeCallListener();
     _userController.dispose();
     _passController.dispose();
     _domainController.dispose();

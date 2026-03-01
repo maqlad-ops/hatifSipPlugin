@@ -23,6 +23,8 @@ class LinphoneFlutterPlugin {
       EventChannel("linphonesdk/login_listener");
   static const EventChannel _callEventListener =
       EventChannel("linphonesdk/call_event_listener");
+  static const EventChannel _callDataListener =
+      EventChannel("linphonesdk/call_data_listener");
 
   void _log(String message, {Object? data}) {
     final ts = DateTime.now().toIso8601String();
@@ -79,7 +81,7 @@ class LinphoneFlutterPlugin {
     required String userName,
     required String domain,
     required String password,
-    SipTransport transport = SipTransport.tls,
+    SipTransport transport = SipTransport.udp,
   }) async {
     _log("loginWithTransport", data: {
       "user": userName,
@@ -104,6 +106,20 @@ class LinphoneFlutterPlugin {
     final res = await _channel.invokeMethod("logout");
     _log("logout done", data: res);
     return res;
+  }
+
+  /// Start the background SIP service (persistent foreground notification)
+  Future<void> startService() async {
+    _log("startService invoked");
+    await _channel.invokeMethod("start_service");
+    _log("startService done");
+  }
+
+  /// Stop the background SIP service completely
+  Future<void> stopService() async {
+    _log("stopService invoked");
+    await _channel.invokeMethod("stop_service");
+    _log("stopService done");
   }
 
   /// Toggle speaker on/off
@@ -252,6 +268,16 @@ class LinphoneFlutterPlugin {
     return res;
   }
 
+  /// Get current call data as a JSON map
+  /// Includes: hasActiveCall, callState, remoteName, remoteUri,
+  ///   duration, muted, speaker, onHold, registrationState
+  Future<Map<String, dynamic>> getCallData() async {
+    final res = await _channel.invokeMethod("get_call_data");
+    _log("getCallData", data: res);
+    if (res == null || res.toString().isEmpty) return {};
+    return Map<String, dynamic>.from(jsonDecode(res.toString()));
+  }
+
   /// Get current registration state
   /// Returns: "Ok", "Progress", "None", "Cleared", "Failed"
   Future<String> getRegistrationState() async {
@@ -373,6 +399,21 @@ class LinphoneFlutterPlugin {
         callState = CallState.error;
       }
       return callState;
+    });
+  }
+
+  /// Listen to comprehensive call data changes (JSON snapshots).
+  /// Emits a map on EVERY state change with:
+  ///   hasActiveCall, callState, remoteName, remoteUri,
+  ///   duration, muted, speaker, onHold, registrationState
+  Stream<Map<String, dynamic>> addCallDataListener() {
+    _log("addCallDataListener attached");
+    return _callDataListener.receiveBroadcastStream().map((event) {
+      _log("call data event", data: event);
+      if (event is String) {
+        return Map<String, dynamic>.from(jsonDecode(event));
+      }
+      return <String, dynamic>{};
     });
   }
 }

@@ -1,6 +1,5 @@
 package com.spagreen.linphonesdk;
 
-import android.app.Activity;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.media.AudioManager;
@@ -61,8 +60,8 @@ import io.flutter.plugin.common.MethodChannel;
 public class LinPhoneHelper {
     private final String TAG = "LinPhoneSDK";
     private static Core core = null;
+    private static LinPhoneHelper instance;
     private Context context;
-    private Activity activity;
     private String domain, userName, password;
     private EventChannelHelper loginListener;
     private EventChannelHelper callEventListener;
@@ -91,16 +90,165 @@ public class LinPhoneHelper {
     private static final String DEFAULT_STUN_SERVER = "stun.linphone.org";
     private static final int DEFAULT_STUN_PORT = 3478;
 
-    public LinPhoneHelper(Activity context, EventChannelHelper loginListener, EventChannelHelper callEventListener) {
+    public static synchronized LinPhoneHelper getInstance() {
+        return instance;
+    }
+
+    public static synchronized LinPhoneHelper getOrCreateInstance(Context context) {
+        if (instance == null) {
+            instance = new LinPhoneHelper(context.getApplicationContext());
+        }
+        return instance;
+    }
+
+    public LinPhoneHelper(Context context) {
         this.context = context;
-        this.activity = context;
-        this.loginListener = loginListener;
-        this.callEventListener = callEventListener;
         this.audioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
         this.mainHandler = new Handler(Looper.getMainLooper());
         this.preferences = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE);
         this.userConfig = loadUserConfig();
         Log.d(TAG, "Loaded user config -> " + new Gson().toJson(userConfig));
+        instance = this;
+    }
+
+    public void setLoginListener(EventChannelHelper listener) {
+        this.loginListener = listener;
+    }
+
+    public void setCallEventListener(EventChannelHelper listener) {
+        this.callEventListener = listener;
+    }
+
+    private EventChannelHelper callDataListener;
+
+    public void setCallDataListener(EventChannelHelper listener) {
+        this.callDataListener = listener;
+    }
+
+    /**
+     * Broadcast a JSON snapshot of ALL call data to the Flutter EventChannel.
+     * Called on every state change so the Flutter app always has fresh data.
+     */
+    public void broadcastCallData() {
+        EventChannelHelper l = callDataListener;
+        if (l == null)
+            return;
+        try {
+            org.json.JSONObject json = buildCallDataJson();
+            l.success(json.toString());
+        } catch (Exception e) {
+            Log.e(TAG, "Error broadcasting call data", e);
+        }
+    }
+
+    /** Build call data JSON — used by both broadcastCallData and getCallDataJson */
+    private org.json.JSONObject buildCallDataJson() throws org.json.JSONException {
+        org.json.JSONObject json = new org.json.JSONObject();
+        boolean hasCall = core != null && core.getCallsNb() > 0;
+        json.put("hasActiveCall", hasCall);
+
+        if (hasCall) {
+            Call call = core.getCurrentCall();
+            if (call == null && core.getCalls().length > 0)
+                call = core.getCalls()[0];
+            if (call != null) {
+                json.put("callState", call.getState().name());
+                String name = call.getRemoteAddress().getDisplayName();
+                if (name == null || name.isEmpty())
+                    name = call.getRemoteAddress().getUsername();
+                json.put("remoteName", name != null ? name : "");
+                json.put("remoteUri", call.getRemoteAddress().asStringUriOnly());
+                json.put("duration", call.getDuration());
+                json.put("muted", call.getMicrophoneMuted());
+                json.put("speaker", isSpeakerEnabled());
+                Call.State st = call.getState();
+                json.put("onHold", st == Call.State.Paused || st == Call.State.PausedByRemote);
+            } else {
+                putEmptyCallFields(json);
+            }
+        } else {
+            putEmptyCallFields(json);
+        }
+
+        String regState = "None";
+        if (core != null && core.getDefaultAccount() != null) {
+            regState = core.getDefaultAccount().getState().name();
+        }
+        json.put("registrationState", regState);
+        return json;
+    }
+
+    private void putEmptyCallFields(org.json.JSONObject json) throws org.json.JSONException {
+        json.put("callState", "Idle");
+        json.put("remoteName", "");
+        json.put("remoteUri", "");
+        json.put("duration", 0);
+        json.put("muted", false);
+        json.put("speaker", false);
+        json.put("onHold", false);
+    }
+
+    /** Get current call data as JSON string (for method channel) */
+    public String getCallDataJson() {
+        try {
+            return buildCallDataJson().toString();
+        } catch (Exception e) {
+            Log.e(TAG, "Error building call data JSON", e);
+            return "{}";
+        }
+    }
+
+    /** Thread-safe event helpers – guard against null event channels */
+    private void sendLoginEvent(String event) {
+        EventChannelHelper l = loginListener;
+        if (l != null)
+            l.success(event);
+    }
+
+    private void sendLoginError(String code, String msg, Object details) {
+        EventChannelHelper l = loginListener;
+        if (l != null)
+            l.error(code, msg, details);
+    }
+
+    private void sendCallEvent(String event) {
+        EventChannelHelper c = callEventListener;
+        if (c != null)
+            c.success(event);
+    }
+
+    private void sendCallError(String code, String msg, Object details) {
+        EventChannelHelper c = callEventListener;
+        if (c != null)
+            c.error(code, msg, details);
+    }
+
+    /**
+     * Push current call details (mute/hold/speaker/state) to the service
+     * notification
+     */
+    private void pushCallDetailsToService(Call call, String stateName) {
+        String remoteName = "";
+        boolean muted = false;
+        boolean onHold = false;
+        boolean speaker = false;
+        try {
+            if (call != null) {
+                String displayName = call.getRemoteAddress().getDisplayName();
+                if (displayName == null || displayName.isEmpty()) {
+                    displayName = call.getRemoteAddress().getUsername();
+                }
+                remoteName = displayName != null ? displayName : call.getRemoteAddress().asStringUriOnly();
+                muted = call.getMicrophoneMuted();
+                Call.State st = call.getState();
+                onHold = (st == Call.State.Paused || st == Call.State.PausedByRemote);
+                speaker = isSpeakerEnabled();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Error reading call details for notification", e);
+        }
+        SipForegroundService.updateCallDetails(stateName, remoteName, muted, onHold, speaker);
+        broadcastCallData();
     }
 
     /**
@@ -117,11 +265,23 @@ public class LinPhoneHelper {
      *                      TransportType.Tls
      */
     public void login(String userName, String domain, String password, TransportType transportType) {
+        Log.d(TAG, "login requested -> user=" + userName + " domain=" + domain + " transport=" + transportType.name());
+
+        // If already registered with the same credentials, skip re-registration
+        if (core != null && userName != null && userName.equals(this.userName)
+                && domain != null && domain.equals(this.domain)) {
+            Account acct = core.getDefaultAccount();
+            if (acct != null && acct.getState() == RegistrationState.Ok) {
+                Log.d(TAG, "Already registered with same credentials — skipping login");
+                sendLoginEvent("Ok");
+                broadcastCallData();
+                return;
+            }
+        }
+
         this.domain = domain;
         this.userName = userName;
         this.password = password;
-
-        Log.d(TAG, "login requested -> user=" + userName + " domain=" + domain + " transport=" + transportType.name());
 
         Log.d(TAG, "login using config -> " + new Gson().toJson(userConfig));
 
@@ -133,7 +293,6 @@ public class LinPhoneHelper {
         if (core != null) {
             Log.d(TAG, "Cleaning up existing core before new login");
             stopKeepAliveTimer();
-            SipForegroundService.stop(context);
             core.removeListener(coreListener);
             core.stop();
             core = null;
@@ -233,10 +392,11 @@ public class LinPhoneHelper {
                     @NonNull String message) {
                 Log.d(TAG, "Registration state: " + registrationState.name() + " - " + message);
 
+                // Push state to the foreground service notification
+                SipForegroundService.updateRegistrationState(registrationState.name());
+
                 if (registrationState == RegistrationState.Ok) {
                     Log.d(TAG, "Successfully registered to SIP server");
-                    // Log the Contact address the server has for us – this is
-                    // where the server will route incoming INVITEs.
                     try {
                         AccountParams currentParams = account.getParams();
                         if (currentParams != null && currentParams.getIdentityAddress() != null) {
@@ -250,23 +410,46 @@ public class LinPhoneHelper {
                     }
                     startKeepAliveTimer();
                     startHealthMonitor();
-                    // Start foreground service so Android keeps the process
-                    // alive and does not throttle network – required to
-                    // receive incoming SIP INVITEs.
-                    SipForegroundService.start(context);
-                    loginListener.success("Ok");
+                    SipForegroundService.start(context, userName);
+                    sendLoginEvent("Ok");
+                    broadcastCallData();
                 } else if (registrationState == RegistrationState.Failed) {
                     Log.e(TAG, "Registration failed: " + message);
                     stopKeepAliveTimer();
                     stopHealthMonitor();
-                    loginListener.error("400", "Login failed", message);
+                    sendLoginError("400", "Login failed", message);
+                    broadcastCallData();
                 } else if (registrationState == RegistrationState.Cleared) {
                     Log.d(TAG, "Registration cleared");
                     stopKeepAliveTimer();
                     stopHealthMonitor();
+                    broadcastCallData();
                 }
             }
         });
+
+        // =============================
+        // DISABLE SDK AUTO-ITERATE BEFORE START
+        // =============================
+        // Must be set BEFORE core.start() to prevent the SDK from launching
+        // its built-in CoreService (which shows a persistent foreground
+        // notification). We handle iterations ourselves.
+        try {
+            java.lang.reflect.Method mAutoItPre = core.getClass().getMethod("setAutoIterateEnabled", boolean.class);
+            mAutoItPre.invoke(core, false);
+            Log.d(TAG, "Pre-start: auto-iterate disabled");
+        } catch (Exception e) {
+            Log.d(TAG, "Pre-start: setAutoIterateEnabled not available: " + e.getMessage());
+        }
+        // Also set config flags before start
+        try {
+            Config preCfg = core.getConfig();
+            preCfg.setBool("app", "auto_iterate", false);
+            preCfg.setBool("app", "auto_start", false);
+            preCfg.setBool("app", "use_core_service", false);
+        } catch (Exception e) {
+            Log.d(TAG, "Pre-start: config flags not settable: " + e.getMessage());
+        }
 
         // =============================
         // START CORE
@@ -274,6 +457,43 @@ public class LinPhoneHelper {
         core.start();
 
         Log.d(TAG, "Core start invoked, setting network reachable");
+
+        // =============================
+        // DISABLE SDK's AUTO-ITERATE / CoreService (AFTER start!)
+        // =============================
+        // The SDK's CoreService is a foreground service that shows its own
+        // notification. We handle iterations ourselves (startCoreIteration)
+        // and notifications via SipForegroundService, so disable the SDK's
+        // automatic behavior to prevent a persistent keep-alive notification.
+        try {
+            java.lang.reflect.Method mAutoIterate = core.getClass().getMethod("setAutoIterateEnabled", boolean.class);
+            mAutoIterate.invoke(core, false);
+            Log.d(TAG, "Auto-iterate DISABLED (we handle iterations ourselves)");
+        } catch (NoSuchMethodException nsme) {
+            Log.d(TAG, "setAutoIterateEnabled not available on this SDK build");
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to disable auto-iterate: " + e.getMessage());
+        }
+        // Also try to disable auto-foreground service via config
+        try {
+            Config cfg = core.getConfig();
+            cfg.setBool("app", "auto_iterate", false);
+            cfg.setBool("app", "auto_start", false);
+            // Prevent the SDK from starting its own CoreService
+            cfg.setBool("app", "use_core_service", false);
+            Log.d(TAG, "Auto-iterate config flags disabled");
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to set auto-iterate config: " + e.getMessage());
+        }
+
+        // =============================
+        // KILL SDK's CoreService & PURGE ITS NOTIFICATIONS
+        // =============================
+        // Even though CoreService is removed from the manifest via
+        // tools:node="remove", the SDK's CoreManager may still try
+        // to post notifications or start the service. Belt-and-suspenders:
+        // explicitly stop the service and cancel all SDK notifications.
+        killSdkCoreServiceNotifications();
 
         // CRITICAL: setNetworkReachable MUST be called AFTER core.start().
         // Calling it before start() has no effect because start() resets
@@ -776,6 +996,94 @@ public class LinPhoneHelper {
     }
 
     /**
+     * Aggressively kill the Linphone SDK's built-in CoreService and purge
+     * any notifications it may have created. Called after core.start() to
+     * ensure no keep-alive notification persists.
+     */
+    private void killSdkCoreServiceNotifications() {
+        try {
+            // 1. Try to explicitly stop the SDK's CoreService (if it somehow started)
+            try {
+                android.content.Intent coreServiceIntent = new android.content.Intent();
+                coreServiceIntent.setClassName(context.getPackageName(),
+                        "org.linphone.core.tools.service.CoreService");
+                context.stopService(coreServiceIntent);
+                Log.d(TAG, "Stopped SDK CoreService (if running)");
+            } catch (Exception e) {
+                Log.d(TAG, "CoreService stop attempt: " + e.getMessage());
+            }
+
+            // 2. Cancel ALL notifications the SDK might have posted
+            android.app.NotificationManager nm = (android.app.NotificationManager) context
+                    .getSystemService(android.content.Context.NOTIFICATION_SERVICE);
+            if (nm != null) {
+                // SDK typically uses notification IDs 1, 2, 3
+                nm.cancel(1);
+                nm.cancel(2);
+                nm.cancel(3);
+                // Also cancel with tags the SDK might use
+                nm.cancel("linphone", 1);
+                nm.cancel("linphone_core", 1);
+
+                // 3. Delete ALL known SDK notification channels
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                    String[] sdkChannels = {
+                            "org.linphone.core.service_notification_channel",
+                            "linphone_notification_channel",
+                            "Linphone",
+                            "linphone_channel",
+                            "org_linphone_core_service_channel",
+                            "linphone_core_notification_channel",
+                            "service_notification_channel",
+                            "linphone_service_channel",
+                            "linphone_idle_channel"
+                    };
+                    for (String ch : sdkChannels) {
+                        nm.deleteNotificationChannel(ch);
+                    }
+
+                    // 4. Nuclear option: cancel ALL active notifications that
+                    // don't belong to our NOTIF_ID (10001)
+                    for (android.service.notification.StatusBarNotification sbn : nm.getActiveNotifications()) {
+                        if (sbn.getId() != 10001 && sbn.getPackageName().equals(context.getPackageName())) {
+                            nm.cancel(sbn.getTag(), sbn.getId());
+                            Log.d(TAG, "Cancelled rogue notification: id=" + sbn.getId()
+                                    + " tag=" + sbn.getTag() + " channel=" + sbn.getNotification().getChannelId());
+                        }
+                    }
+                }
+                Log.d(TAG, "SDK notification channels purged, stale notifications cancelled");
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Error killing SDK notifications: " + e.getMessage());
+        }
+
+        // 5. Schedule another purge 3 seconds later (in case SDK creates them
+        // post-start)
+        mainHandler.postDelayed(() -> {
+            try {
+                android.app.NotificationManager nm = (android.app.NotificationManager) context
+                        .getSystemService(android.content.Context.NOTIFICATION_SERVICE);
+                if (nm != null) {
+                    nm.cancel(1);
+                    nm.cancel(2);
+                    nm.cancel(3);
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                        for (android.service.notification.StatusBarNotification sbn : nm.getActiveNotifications()) {
+                            if (sbn.getId() != 10001 && sbn.getPackageName().equals(context.getPackageName())) {
+                                nm.cancel(sbn.getTag(), sbn.getId());
+                                Log.d(TAG, "Delayed purge: cancelled notification id=" + sbn.getId());
+                            }
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "Delayed notification purge error: " + e.getMessage());
+            }
+        }, 3000);
+    }
+
+    /**
      * Start core iteration timer (required for Linphone to work)
      */
     private void startCoreIteration() {
@@ -914,7 +1222,7 @@ public class LinPhoneHelper {
     public void call(String number) {
         if (core == null) {
             Log.e(TAG, "call: Core is null, not logged in");
-            callEventListener.error("Error", "Not logged in", "Core is null");
+            sendCallError("Error", "Not logged in", "Core is null");
             return;
         }
 
@@ -924,7 +1232,7 @@ public class LinPhoneHelper {
         Account defaultAccount = core.getDefaultAccount();
         if (defaultAccount == null) {
             Log.e(TAG, "call: No default account configured");
-            callEventListener.error("Error", "No account", "No default account configured");
+            sendCallError("Error", "No account", "No default account configured");
             return;
         }
 
@@ -933,7 +1241,7 @@ public class LinPhoneHelper {
 
         if (regState != RegistrationState.Ok) {
             Log.e(TAG, "call: Not registered (state=" + regState.name() + "), cannot make call");
-            callEventListener.error("Error", "Not registered", "Registration state: " + regState.name());
+            sendCallError("Error", "Not registered", "Registration state: " + regState.name());
             return;
         }
 
@@ -1000,7 +1308,7 @@ public class LinPhoneHelper {
 
         if (call == null) {
             Log.e(TAG, "call: Failed to initiate call");
-            callEventListener.error("Error", "Call failed", "Failed to initiate call");
+            sendCallError("Error", "Call failed", "Failed to initiate call");
         } else {
             Log.d(TAG, "call: Call initiated successfully");
         }
@@ -1120,7 +1428,7 @@ public class LinPhoneHelper {
         }
 
         call.terminate();
-        callEventListener.success("Released");
+        sendCallEvent("Released");
         Log.d(TAG, "Call terminated");
     }
 
@@ -1131,6 +1439,7 @@ public class LinPhoneHelper {
             boolean currentlyMuted = core.getCurrentCall().getMicrophoneMuted();
             core.getCurrentCall().setMicrophoneMuted(!currentlyMuted);
             Log.d(TAG, "toggleMute: " + (!currentlyMuted ? "muted" : "unmuted"));
+            pushCallDetailsToService(core.getCurrentCall(), "In Call");
             return !currentlyMuted;
         }
         return false;
@@ -1326,11 +1635,13 @@ public class LinPhoneHelper {
                 currentCall.setInputAudioDevice(audioDevice);
                 audioManager.setSpeakerphoneOn(false);
                 Log.d(TAG, "Switched to Earpiece");
+                pushCallDetailsToService(currentCall, "In Call");
                 return;
             } else if (!speakerEnabled && audioDevice.getType() == AudioDevice.Type.Speaker) {
                 currentCall.setOutputAudioDevice(audioDevice);
                 audioManager.setSpeakerphoneOn(true);
                 Log.d(TAG, "Switched to Speaker");
+                pushCallDetailsToService(currentCall, "In Call");
                 return;
             }
         }
@@ -1342,6 +1653,10 @@ public class LinPhoneHelper {
         } else {
             audioManager.setSpeakerphoneOn(true);
             Log.d(TAG, "Fallback: Enabled speaker via AudioManager");
+        }
+        // Update the notification with new speaker state
+        if (core.getCurrentCall() != null) {
+            pushCallDetailsToService(core.getCurrentCall(), "In Call");
         }
     }
 
@@ -1552,31 +1867,17 @@ public class LinPhoneHelper {
         if (call == null)
             return;
         call.terminate();
-        callEventListener.success("CallRejected");
+        sendCallEvent("CallRejected");
     }
 
     public void removeLoginListener() {
-        if (core == null)
-            return;
-        stopKeepAliveTimer();
-        SipForegroundService.stop(context);
-        core.removeListener(coreListener);
-        core.stop();
-        core = null;
-        loginListener.handler = null;
-        Log.d(TAG, "Login listener removed and core stopped");
+        loginListener = null;
+        Log.d(TAG, "Login listener disconnected (core continues running in service)");
     }
 
     public void removeCallListener() {
-        if (core == null)
-            return;
-        stopKeepAliveTimer();
-        SipForegroundService.stop(context);
-        core.removeListener(coreListener);
-        core.stop();
-        core = null;
-        callEventListener.handler = null;
-        Log.d(TAG, "Call listener removed and core stopped");
+        callEventListener = null;
+        Log.d(TAG, "Call listener disconnected (core continues running in service)");
     }
 
     /**
@@ -1609,6 +1910,38 @@ public class LinPhoneHelper {
     }
 
     /**
+     * Get current call state as a string for native Activities.
+     * Returns "none" if no active call.
+     */
+    public String getCurrentCallStatus() {
+        if (core == null || core.getCallsNb() == 0)
+            return "none";
+        Call call = core.getCurrentCall();
+        if (call == null && core.getCalls().length > 0)
+            call = core.getCalls()[0];
+        if (call == null)
+            return "none";
+        return call.getState().name();
+    }
+
+    /**
+     * Get the remote party's display name for the current call.
+     */
+    public String getCurrentCallRemoteName() {
+        if (core == null || core.getCallsNb() == 0)
+            return "";
+        Call call = core.getCurrentCall();
+        if (call == null && core.getCalls().length > 0)
+            call = core.getCalls()[0];
+        if (call == null)
+            return "";
+        String name = call.getRemoteAddress().getDisplayName();
+        if (name == null || name.isEmpty())
+            name = call.getRemoteAddress().getUsername();
+        return name != null ? name : "";
+    }
+
+    /**
      * Get Core instance (for advanced operations)
      */
     public static Core getCore() {
@@ -1620,7 +1953,9 @@ public class LinPhoneHelper {
         public void onAccountRegistrationStateChanged(@NonNull Core core, @NonNull Account account,
                 RegistrationState state, @NonNull String message) {
             Log.d(TAG, "Registration state changed: " + state.name() + " - " + message);
-            loginListener.success(state.name());
+            SipForegroundService.updateRegistrationState(state.name());
+            sendLoginEvent(state.name());
+            broadcastCallData();
         }
 
         @Override
@@ -1635,97 +1970,146 @@ public class LinPhoneHelper {
                     Log.d(TAG, ">>> From: " + call.getRemoteAddress().asStringUriOnly());
                     Log.d(TAG, ">>> CallId: " + (call.getCallLog() != null ? call.getCallLog().getCallId() : "?"));
                     Log.d(TAG, ">>> Direction: " + call.getDir().name());
-                    Log.d(TAG, ">>> callEventListener.isReady="
-                            + (callEventListener != null && callEventListener.isReady()));
-                    // NOTE: Do NOT requestAudioFocus() here. Acquiring audio focus
-                    // before the user accepts the call causes the PBX to see the
-                    // call as "held" (early media with no active streams).
-                    // Audio focus is correctly requested inside answerCall().
-                    callEventListener.success(state.name());
-                    Log.d(TAG, ">>> IncomingReceived event sent to Flutter");
+                // Show incoming call via native Activity (full-screen intent)
+                {
+                    String callerUri = call.getRemoteAddress().asStringUriOnly();
+                    String callerDisplay = call.getRemoteAddress().getDisplayName();
+                    if (callerDisplay == null || callerDisplay.isEmpty()) {
+                        callerDisplay = call.getRemoteAddress().getUsername();
+                    }
+                    SipForegroundService.showIncomingCall(context, callerUri,
+                            callerDisplay != null ? callerDisplay : callerUri);
+                }
+                    sendCallEvent(state.name());
+                    broadcastCallData();
+                    Log.d(TAG, ">>> IncomingReceived event sent");
                     break;
 
                 case PushIncomingReceived:
                     Log.d(TAG, ">>> PUSH INCOMING CALL DETECTED <<<");
-                    Log.d(TAG, ">>> From: " + call.getRemoteAddress().asStringUriOnly());
-                    // NOTE: Do NOT requestAudioFocus() here (same reason as IncomingReceived).
-                    callEventListener.success("IncomingReceived");
-                    Log.d(TAG, ">>> PushIncomingReceived event sent to Flutter");
+                    Log.d(TAG, ">>> From: " + call.getRemoteAddress().asStringUriOnly()); {
+                    String pushCallerUri = call.getRemoteAddress().asStringUriOnly();
+                    String pushCallerDisplay = call.getRemoteAddress().getDisplayName();
+                    if (pushCallerDisplay == null || pushCallerDisplay.isEmpty()) {
+                        pushCallerDisplay = call.getRemoteAddress().getUsername();
+                    }
+                    SipForegroundService.showIncomingCall(context, pushCallerUri,
+                            pushCallerDisplay != null ? pushCallerDisplay : pushCallerUri);
+                }
+                    sendCallEvent("IncomingReceived");
+                    broadcastCallData();
+                    Log.d(TAG, ">>> PushIncomingReceived event sent");
                     break;
 
                 case IncomingEarlyMedia:
                     Log.d(TAG, "Incoming early media");
-                    callEventListener.success(state.name());
+                    sendCallEvent(state.name());
+                    broadcastCallData();
                     break;
 
                 case OutgoingInit:
-                    Log.d(TAG, "Outgoing call initiated");
-                    callEventListener.success(state.name());
+                    Log.d(TAG, "Outgoing call initiated"); {
+                    String outUri = call.getRemoteAddress().asStringUriOnly();
+                    String outName = call.getRemoteAddress().getDisplayName();
+                    if (outName == null || outName.isEmpty()) {
+                        outName = call.getRemoteAddress().getUsername();
+                    }
+                    SipForegroundService.launchActiveCallScreen(context,
+                            outName != null ? outName : outUri, outUri);
+                }
+                    pushCallDetailsToService(call, "Dialing");
+                    sendCallEvent(state.name());
                     break;
 
                 case OutgoingProgress:
                     Log.d(TAG, "Outgoing call progress");
-                    callEventListener.success(state.name());
+                    pushCallDetailsToService(call, "Calling…");
+                    sendCallEvent(state.name());
                     break;
 
                 case OutgoingRinging:
                     Log.d(TAG, "Remote party ringing");
-                    callEventListener.success(state.name());
+                    pushCallDetailsToService(call, "Ringing");
+                    sendCallEvent(state.name());
                     break;
 
                 case Connected:
                     Log.d(TAG, "Call connected");
-                    callEventListener.success(state.name());
+                    IncomingCallActivity.finishIfRunning();
+                    SipForegroundService.startCallMode(context);
+                    killSdkCoreServiceNotifications();
+                    pushCallDetailsToService(call, "Connected");
+                    sendCallEvent(state.name());
                     break;
 
                 case StreamsRunning:
                     Log.d(TAG, "Media streams running");
-                    // Ensure proper audio routing when streams start
                     mainHandler.post(() -> {
                         ensureAudioRouting();
                         logAudioStreamInfo(call);
                     });
-                    callEventListener.success(state.name());
+                    // Purge any SDK-created keep-alive notifications that
+                    // appear when streams become active
+                    killSdkCoreServiceNotifications();
+                    pushCallDetailsToService(call, "In Call");
+                    sendCallEvent(state.name());
                     break;
 
                 case Paused:
                     Log.d(TAG, "Call paused");
-                    callEventListener.success(state.name());
+                    pushCallDetailsToService(call, "On Hold");
+                    sendCallEvent(state.name());
                     break;
 
                 case PausedByRemote:
                     Log.d(TAG, "Call paused by remote");
-                    callEventListener.success(state.name());
+                    pushCallDetailsToService(call, "Held by Remote");
+                    sendCallEvent(state.name());
                     break;
 
                 case Updating:
                     Log.d(TAG, "Call updating");
-                    callEventListener.success(state.name());
+                    sendCallEvent(state.name());
+                    broadcastCallData();
                     break;
 
                 case UpdatedByRemote:
                     Log.d(TAG, "Call updated by remote");
-                    callEventListener.success(state.name());
+                    sendCallEvent(state.name());
+                    broadcastCallData();
                     break;
 
                 case Released:
                     Log.d(TAG, "Call released");
-                    callEventListener.success(state.name());
+                    SipForegroundService.stopCallMode(context);
+                    IncomingCallActivity.finishIfRunning();
+                    ActiveCallActivity.finishIfRunning();
+                    sendCallEvent(state.name());
+                    broadcastCallData();
                     break;
 
                 case End:
                     Log.d(TAG, "Call ended - Reason: " + call.getReason().name());
-                    callEventListener.success(state.name());
+                    SipForegroundService.stopCallMode(context);
+                    IncomingCallActivity.finishIfRunning();
+                    ActiveCallActivity.finishIfRunning();
+                    sendCallEvent(state.name());
+                    broadcastCallData();
                     break;
 
                 case EarlyUpdatedByRemote:
                     Log.d(TAG, "Early update by remote");
-                    callEventListener.success(state.name());
+                    sendCallEvent(state.name());
+                    broadcastCallData();
                     break;
 
                 case Error:
                     Log.e(TAG, "Call error: " + message + " - Reason: " + call.getReason().name());
-                    callEventListener.success(state.name());
+                    SipForegroundService.stopCallMode(context);
+                    IncomingCallActivity.finishIfRunning();
+                    ActiveCallActivity.finishIfRunning();
+                    sendCallEvent(state.name());
+                    broadcastCallData();
                     break;
 
                 default:
@@ -2079,8 +2463,8 @@ public class LinPhoneHelper {
         static final int CURRENT_CONFIG_VERSION = 2;
         int configVersion = CURRENT_CONFIG_VERSION;
 
-        String userAgentName = "Sipnetic";
-        String userAgentVersion = "1.1.9 Android";
+        String userAgentName = "Hatif";
+        String userAgentVersion = "Android";
         String stunServer = DEFAULT_STUN_SERVER;
         int stunPort = DEFAULT_STUN_PORT;
         boolean enableStun = true;
